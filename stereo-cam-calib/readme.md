@@ -11,6 +11,17 @@ Prepare Data
 	- `stereo-cam-calib/cali_data1/workspace_cali/front_stereo_cam_left`
 	- `stereo-cam-calib/cali_data1/workspace_cali/front_stereo_cam_right`
 
+Dependencies
+- Python 3.9+ recommended
+- `opencv-python`
+- `PyYAML` (for YAML output)
+Install via pip or conda, e.g.:
+```powershell
+python -m pip install opencv-python PyYAML
+# or
+conda install -n recons -c conda-forge opencv pyyaml
+```
+
 Run Calibration (Windows PowerShell)
 ```powershell
 # Activate your environment if needed

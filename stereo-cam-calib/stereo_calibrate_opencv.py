@@ -157,6 +157,43 @@ def preview_rectification(left_img, right_img, map1x, map1y, map2x, map2y):
     cv2.imshow("Rectified Preview (Green lines should be horizontal)", combined)
     cv2.waitKey(0)
 
+
+def preview_rectification_sequence(pairs: List[Tuple[Path, Path]], map1x, map1y, map2x, map2y):
+    """Allow stepping through all rectified pairs with n/p/q keys."""
+    idx = 0
+    total = len(pairs)
+    if total == 0:
+        return
+    while True:
+        lp, rp = pairs[idx]
+        left_img = cv2.imread(str(lp))
+        right_img = cv2.imread(str(rp))
+        if left_img is None or right_img is None:
+            text = f"[{idx+1}/{total}] Failed to read {lp.name}/{rp.name}"
+            blank = np.zeros((480, 640, 3), dtype=np.uint8)
+            cv2.putText(blank, text, (20, 240), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 1, cv2.LINE_AA)
+            cv2.imshow("Rectified Preview (n/p to navigate, q to quit)", blank)
+        else:
+            left_rect = cv2.remap(left_img, map1x, map1y, interpolation=cv2.INTER_LINEAR)
+            right_rect = cv2.remap(right_img, map2x, map2y, interpolation=cv2.INTER_LINEAR)
+            combined = np.hstack([left_rect, right_rect])
+            h, w = combined.shape[:2]
+            for y in range(0, h, 30):
+                cv2.line(combined, (0, y), (w - 1, y), (0, 255, 0), 1)
+            cv2.putText(combined, f"{idx+1}/{total}: {lp.name}", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2, cv2.LINE_AA)
+            cv2.imshow("Rectified Preview (n/p to navigate, q to quit)", combined)
+
+        key = cv2.waitKey(0) & 0xFF
+        if key in (ord('q'), 27):
+            break
+        if key == ord('n'):
+            idx = (idx + 1) % total
+        elif key == ord('p'):
+            idx = (idx - 1 + total) % total
+        else:
+            continue
+    cv2.destroyAllWindows()
+
 def main():
     parser = argparse.ArgumentParser(description="Updated Python Stereo Calib (Fixing Zero-Division)")
     parser.add_argument("--left", required=True, help="Path to left images")
@@ -244,11 +281,8 @@ def main():
     map2x, map2y = cv2.fisheye.initUndistortRectifyMap(K2, D2, R2, P2, image_size, cv2.CV_16SC2)
     
     if args.preview:
-        print("Showing rectified result. Press any key to close.")
-        img_l = cv2.imread(str(pairs[0][0]))
-        img_r = cv2.imread(str(pairs[0][1]))
-        preview_rectification(img_l, img_r, map1x, map1y, map2x, map2y)
-        cv2.destroyAllWindows()
+        print("Preview rectified pairs: press 'n'/'p' to navigate, 'q' or ESC to quit.")
+        preview_rectification_sequence(pairs, map1x, map1y, map2x, map2y)
 
     # Save Results
     out_dir = Path(os.path.commonpath([left_dir, right_dir]))
