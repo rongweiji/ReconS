@@ -1,15 +1,15 @@
 Stereo Calibration (OpenCV, no ROS)
 
 Checkerboard
-- Inner corners: 8 rows x 6 cols (cross point count, not squares)
+- Inner corners: 8 rows x 6 cols (cross points). Use 6 8 if your board is rotated.
 - Square size: 27 mm (0.027 m)
-- Printed on letter size paper (original 108 mm squares, scaled to 25% → 27 mm)
+- Printed on letter paper; original 108 mm squares scaled to 25% → 27 mm.
 
 Prepare Data
 - Place synchronized image pairs in two folders (left/right) with matching filenames.
 - Example paths:
-	- `stereo-cam-calib/cali_data1/workspace3/front_stereo_cam_left`
-	- `stereo-cam-calib/cali_data1/workspace3/front_stereo_cam_right`
+	- `stereo-cam-calib/cali_data1/workspace_cali/front_stereo_cam_left`
+	- `stereo-cam-calib/cali_data1/workspace_cali/front_stereo_cam_right`
 
 Run Calibration (Windows PowerShell)
 ```powershell
@@ -21,31 +21,31 @@ Run Calibration (Windows PowerShell)
 # or
 # python -m pip install opencv-python PyYAML
 
-# Run with correct checkerboard spec
+# Fisheye-only stereo calibration
 python "g:\GithubProject\ReconS\stereo-cam-calib\stereo_calibrate_opencv.py" `
-	--left  "g:\GithubProject\ReconS\stereo-cam-calib\cali_data1\workspace3\front_stereo_cam_left" `
-	--right "g:\GithubProject\ReconS\stereo-cam-calib\cali_data1\workspace3\front_stereo_cam_right" `
-	--pattern-size 8 6 `
-	--square-size 0.027
+		--left  "g:\GithubProject\ReconS\stereo-cam-calib\cali_data1\workspace_cali\front_stereo_cam_left" `
+		--right "g:\GithubProject\ReconS\stereo-cam-calib\cali_data1\workspace_cali\front_stereo_cam_right" `
+		--pattern-size 8 6 `   # inner corners (rows cols); use 6 8 if rotated
+		--square-size 0.027 `  # meters
+		--max-pairs 0 `        # 0 = use all matched pairs
+		--preview              # optional; shows detection/rectification windows
+		--analyze              # optional; prints coverage/sharpness stats
 ```
 
-Outputs
-- YAML files saved to the common root of the input folders (e.g., `workspace3`):
-	- `stereo_left.yaml` — left camera intrinsics, distortion, rectification, projection
-	- `stereo_right.yaml` — right camera intrinsics, distortion, rectification, projection
-	- `stereo_stereo.yaml` — stereo R/T/E/F, Q, baseline
+Output
+- One YAML saved alongside the left/right folders: `{save_prefix}_result.yaml` (default `stereo_result.yaml`).
+- Fields inside the YAML (float64):
+	- `K1`, `D1`, `K2`, `D2`: intrinsics and fisheye distortion for left/right.
+	- `R`, `T`: stereo rotation and translation (baseline = `norm(T)`, meters).
+	- `R1`, `R2`, `P1`, `P2`, `Q`: rectification, projection, and disparity-to-depth mapping.
+	- `rms`: stereo reprojection RMS reported by OpenCV.
 
-Console Metrics
-- Pairing time: time to match filenames across folders
-- Corner detection: number of valid pairs, total and per-pair time
-- Single-eye reprojection RMS: pixel error per camera (lower is better)
-- Stereo reprojection RMS: pixel error across both cameras (should be similar magnitude to single-eye RMS)
-- Baseline (m): distance between camera centers (norm of T)
-- Rectification + maps time: generating undistort/rectify maps
-- Saving outputs time and Total time
+Console Notes
+- Shows matched/valid pairs, detection time, RMS, baseline, and rectification time.
+- Pairs with failed corner detection are skipped; at least 5 valid pairs are required.
 
 Tips
-- Use full board visibility, sharp focus, varied poses/tilts.
-- Ensure identical resolution between left/right images.
-- If detection fails, verify `--pattern-size` (8 6) and `--square-size` (0.027).
-- For faster runs, you can limit pairs (e.g., `--max-pairs 150`).
+- Keep the board large and move it to edges/corners with varied tilt/depth for better fisheye conditioning.
+- Ensure left/right images are synchronized and the same resolution.
+- If detection fails, double-check `--pattern-size` and `--square-size`.
+- Use `--max-pairs` to limit to a clean subset while debugging.
