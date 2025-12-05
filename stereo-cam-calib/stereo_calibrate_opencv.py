@@ -47,33 +47,126 @@ def build_object_points(board_size: Tuple[int, int], square_size_m: float) -> np
     return objp
 
 
-def calibrate_single(object_points: List[np.ndarray], image_points: List[np.ndarray], image_size: Tuple[int, int]):
-    K = np.zeros((3, 3), dtype=np.float64)
-    D = np.zeros((5, 1), dtype=np.float64)
-    flags = 0
+def calibrate_single(object_points: List[np.ndarray],
+                     image_points: List[np.ndarray],
+                     image_size: Tuple[int, int],
+                     *,
+                     use_fisheye: bool,
+                     use_rational: bool):
     criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 1e-6)
-    ret, K, D, rvecs, tvecs = cv2.calibrateCamera(object_points, image_points, image_size, K, D, flags=flags, criteria=criteria)
+    if use_fisheye:
+        # Get an initial guess from pinhole calibration to stabilize fisheye.
+        K_init = np.zeros((3, 3), dtype=np.float64)
+        D_init = np.zeros((5, 1), dtype=np.float64)
+        obj_pinhole = [p.reshape(-1, 3).astype(np.float32) for p in object_points]
+        img_pinhole = [p.astype(np.float32) for p in image_points]
+        _, K_init, D_init, _, _ = cv2.calibrateCamera(
+            obj_pinhole,
+            img_pinhole,
+            image_size,
+            K_init,
+            D_init,
+            flags=0,
+            criteria=criteria
+        )
+        K = K_init.copy()
+        D = np.zeros((4, 1), dtype=np.float64)
+        flags = (cv2.fisheye.CALIB_RECOMPUTE_EXTRINSIC |
+                 cv2.fisheye.CALIB_FIX_SKEW |
+                 cv2.fisheye.CALIB_USE_INTRINSIC_GUESS)
+        try:
+            ret, K, D, rvecs, tvecs = cv2.fisheye.calibrate(
+                object_points,
+                image_points,
+                image_size,
+                K,
+                D,
+                flags=flags,
+                criteria=criteria
+            )
+        except cv2.error:
+            # Retry without recomputing extrinsics and let intrinsics adjust
+            flags = (cv2.fisheye.CALIB_FIX_SKEW |
+                     cv2.fisheye.CALIB_USE_INTRINSIC_GUESS)
+            ret, K, D, rvecs, tvecs = cv2.fisheye.calibrate(
+                object_points,
+                image_points,
+                image_size,
+                K,
+                D,
+                flags=flags,
+                criteria=criteria
+            )
+    else:
+        K = np.zeros((3, 3), dtype=np.float64)
+        D = np.zeros((8 if use_rational else 5, 1), dtype=np.float64)
+        flags = cv2.CALIB_RATIONAL_MODEL if use_rational else 0
+        ret, K, D, rvecs, tvecs = cv2.calibrateCamera(
+            object_points,
+            image_points,
+            image_size,
+            K,
+            D,
+            flags=flags,
+            criteria=criteria
+        )
     return ret, K, D, rvecs, tvecs
 
 
-def stereo_calibrate(object_points, image_points_left, image_points_right, K1, D1, K2, D2, image_size):
-    flags = cv2.CALIB_FIX_INTRINSIC
-    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 1e-6)
-    retval, K1, D1, K2, D2, R, T, E, F = cv2.stereoCalibrate(
-        object_points,
-        image_points_left,
-        image_points_right,
-        K1, D1,
-        K2, D2,
-        image_size,
-        criteria=criteria,
-        flags=flags
-    )
+def stereo_calibrate(object_points, image_points_left, image_points_right, K1, D1, K2, D2, image_size, *, use_fisheye: bool):
+    if use_fisheye:
+        flags = (cv2.fisheye.CALIB_FIX_INTRINSIC |
+                 cv2.fisheye.CALIB_FIX_SKEW |
+                 cv2.fisheye.CALIB_USE_INTRINSIC_GUESS)
+        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 1e-6)
+        try:
+            retval, K1, D1, K2, D2, R, T = cv2.fisheye.stereoCalibrate(
+                object_points,
+                image_points_left,
+                image_points_right,
+                K1, D1,
+                K2, D2,
+                image_size,
+                flags=flags,
+                criteria=criteria
+            )
+        except cv2.error:
+            # Retry letting intrinsics adjust a bit; still fix skew to reduce degeneracy
+            flags = (cv2.fisheye.CALIB_USE_INTRINSIC_GUESS |
+                     cv2.fisheye.CALIB_FIX_SKEW)
+            retval, K1, D1, K2, D2, R, T = cv2.fisheye.stereoCalibrate(
+                object_points,
+                image_points_left,
+                image_points_right,
+                K1, D1,
+                K2, D2,
+                image_size,
+                flags=flags,
+                criteria=criteria
+            )
+        E, F = np.zeros((3, 3)), np.zeros((3, 3))
+    else:
+        flags = cv2.CALIB_FIX_INTRINSIC
+        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 1e-6)
+        retval, K1, D1, K2, D2, R, T, E, F = cv2.stereoCalibrate(
+            object_points,
+            image_points_left,
+            image_points_right,
+            K1, D1,
+            K2, D2,
+            image_size,
+            criteria=criteria,
+            flags=flags
+        )
     return retval, K1, D1, K2, D2, R, T, E, F
 
 
-def stereo_rectify(K1, D1, K2, D2, image_size, R, T):
-    R1, R2, P1, P2, Q, roi1, roi2 = cv2.stereoRectify(K1, D1, K2, D2, image_size, R, T, flags=cv2.CALIB_ZERO_DISPARITY, alpha=0)
+def stereo_rectify(K1, D1, K2, D2, image_size, R, T, *, use_fisheye: bool):
+    if use_fisheye:
+        R1, R2, P1, P2, Q = cv2.fisheye.stereoRectify(K1, D1, K2, D2, image_size, R, T, flags=cv2.CALIB_ZERO_DISPARITY)
+        roi1 = roi2 = (0, 0, image_size[0], image_size[1])
+    else:
+        R1, R2, P1, P2, Q, roi1, roi2 = cv2.stereoRectify(K1, D1, K2, D2, image_size, R, T, flags=cv2.CALIB_ZERO_DISPARITY, alpha=0)
     return R1, R2, P1, P2, Q, roi1, roi2
 
 
@@ -145,6 +238,9 @@ def main():
     parser.add_argument("--best-pairs", type=int, default=0, help="Quality-based selection: keep top N pairs by detection quality (0 = disabled)")
     parser.add_argument("--preview", action="store_true", help="Show corner detection and rectification previews")
     parser.add_argument("--save-prefix", default="stereo", help="Prefix for output YAML files")
+    parser.add_argument("--fisheye", action="store_true", help="Use OpenCV fisheye model (better for >120° FOV lenses)")
+    parser.add_argument("--rational-model", action="store_true", help="Use 8-coefficient distortion model (helps strong distortion if not using --fisheye)")
+    parser.add_argument("--analyze", action="store_true", help="Print input coverage/sharpness stats to diagnose bad datasets")
     args = parser.parse_args()
     t0 = time.time()
 
@@ -169,12 +265,18 @@ def main():
     # Auto-orientation probe: try both orientations and pick the better one
     board_size = quick_orientation_probe(pairs, board_size)
     print(f"Using pattern size (rows, cols): {board_size[0]} {board_size[1]}")
+    if args.fisheye:
+        print("Using fisheye distortion model (recommended for >=120 deg lenses).")
+    elif args.rational_model:
+        print("Using rational 8-coefficient distortion model.")
     objp = build_object_points(board_size, args.square_size)
 
     objpoints = []
     imgpoints_left = []
     imgpoints_right = []
     image_size = None
+    detect_stats = []
+    coverage_heat = np.zeros((4, 4), dtype=np.int32)  # coarse grid to see coverage spread
 
     t_detect_start = time.time()
     # Optional: quality-based selection pre-pass
@@ -229,8 +331,44 @@ def main():
             continue
 
         objpoints.append(objp)
-        imgpoints_left.append(corners_l)
-        imgpoints_right.append(corners_r)
+        if args.fisheye:
+            imgpoints_left.append(np.ascontiguousarray(corners_l, dtype=np.float64))
+            imgpoints_right.append(np.ascontiguousarray(corners_r, dtype=np.float64))
+        else:
+            imgpoints_left.append(corners_l)
+            imgpoints_right.append(corners_r)
+
+        # Diagnostics: sharpness and coverage
+        lap_l = cv2.Laplacian(gl, cv2.CV_64F).var()
+        lap_r = cv2.Laplacian(gr, cv2.CV_64F).var()
+        def bbox_stats(c: np.ndarray, w: int, h: int):
+            xs = c[:, 0, 0]
+            ys = c[:, 0, 1]
+            dx = float(xs.max() - xs.min())
+            dy = float(ys.max() - ys.min())
+            cx = float(xs.mean())
+            cy = float(ys.mean())
+            return dx, dy, cx, cy
+        dx_l, dy_l, cx_l, cy_l = bbox_stats(corners_l, image_size[0], image_size[1])
+        dx_r, dy_r, cx_r, cy_r = bbox_stats(corners_r, image_size[0], image_size[1])
+        norm_cov_l = (dx_l / image_size[0]) * (dy_l / image_size[1])
+        norm_cov_r = (dx_r / image_size[0]) * (dy_r / image_size[1])
+        center_dist = np.hypot(cx_l - cx_r, cy_l - cy_r)
+        scale_ratio = (dx_l * dy_l + 1e-9) / (dx_r * dy_r + 1e-9)
+        detect_stats.append({
+            "name": lp.name,
+            "lap_l": lap_l,
+            "lap_r": lap_r,
+            "cov_l": norm_cov_l,
+            "cov_r": norm_cov_r,
+            "center_dist": center_dist,
+            "scale_ratio": scale_ratio
+        })
+        # Heatmap (use left corners)
+        gx = np.clip((corners_l[:, 0, 0] / image_size[0] * coverage_heat.shape[1]).astype(int), 0, coverage_heat.shape[1] - 1)
+        gy = np.clip((corners_l[:, 0, 1] / image_size[1] * coverage_heat.shape[0]).astype(int), 0, coverage_heat.shape[0] - 1)
+        for xh, yh in zip(gx, gy):
+            coverage_heat[yh, xh] += 1
 
         if args.preview:
             preview_detected(left_img, corners_l, board_size)
@@ -247,24 +385,62 @@ def main():
           f"{((t_detect_end - t_detect_start) / max(1, len(pairs))):.3f}s/pair avg)")
     print(f"Using {valid_count} valid pairs for calibration.")
 
+    if args.analyze and detect_stats:
+        def stats(arr):
+            return np.min(arr), np.percentile(arr, 25), np.median(arr), np.percentile(arr, 75), np.max(arr)
+        lap_l = np.array([d["lap_l"] for d in detect_stats])
+        lap_r = np.array([d["lap_r"] for d in detect_stats])
+        cov_l = np.array([d["cov_l"] for d in detect_stats])
+        cov_r = np.array([d["cov_r"] for d in detect_stats])
+        cdist = np.array([d["center_dist"] for d in detect_stats])
+        sratio = np.array([d["scale_ratio"] for d in detect_stats])
+        print("\n=== Input diagnostics (use to spot bad pairs) ===")
+        print("Sharpness (Laplacian var) Left  min/p25/med/p75/max:", " / ".join(f"{v:.1f}" for v in stats(lap_l)))
+        print("Sharpness (Laplacian var) Right min/p25/med/p75/max:", " / ".join(f"{v:.1f}" for v in stats(lap_r)))
+        print("Coverage fraction (area/img) Left  min/p25/med/p75/max:", " / ".join(f"{v:.3f}" for v in stats(cov_l)))
+        print("Coverage fraction (area/img) Right min/p25/med/p75/max:", " / ".join(f"{v:.3f}" for v in stats(cov_r)))
+        print("Center distance between L/R (px) min/p25/med/p75/max:", " / ".join(f"{v:.1f}" for v in stats(cdist)))
+        print("Scale ratio L/R (area) min/p25/med/p75/max:", " / ".join(f"{v:.2f}" for v in stats(sratio)))
+        print("Heatmap (rows=top->bottom, cols=left->right) counts of corners on left image:")
+        with np.printoptions(formatter={"int": lambda x: f"{x:3d}"}):
+            print(coverage_heat)
+        print("Heuristics:")
+        print("- Coverage fraction med should be reasonably high (e.g., >0.10). Low values mean board is tiny/centered.")
+        print("- Center distance should vary; all near-zero suggests almost no parallax or identical frames.")
+        print("- Scale ratio far from 1.0 or wildly varying can indicate mismatched pairs or different zoom.")
+        print("- Heatmap should show counts across the grid; if clustered, add poses near corners/edges.")
+
+    # Fisheye expects (N,1,3) object points; standard model accepts (N,3)
+    objpoints_use = [p.reshape(-1, 1, 3).astype(np.float64) for p in objpoints] if args.fisheye else objpoints
+
     t_single_start = time.time()
-    err_l, K1, D1, rvecs1, tvecs1 = calibrate_single(objpoints, imgpoints_left, image_size)
-    err_r, K2, D2, rvecs2, tvecs2 = calibrate_single(objpoints, imgpoints_right, image_size)
+    err_l, K1, D1, rvecs1, tvecs1 = calibrate_single(
+        objpoints_use, imgpoints_left, image_size, use_fisheye=args.fisheye, use_rational=args.rational_model
+    )
+    err_r, K2, D2, rvecs2, tvecs2 = calibrate_single(
+        objpoints_use, imgpoints_right, image_size, use_fisheye=args.fisheye, use_rational=args.rational_model
+    )
     t_single_end = time.time()
     print(f"Single-eye calibration time: {(t_single_end - t_single_start):.2f}s")
     print(f"Single-eye reprojection RMS: left={err_l:.4f}, right={err_r:.4f}")
 
     t_stereo_start = time.time()
-    s_err, K1, D1, K2, D2, R, T, E, F = stereo_calibrate(objpoints, imgpoints_left, imgpoints_right, K1, D1, K2, D2, image_size)
+    s_err, K1, D1, K2, D2, R, T, E, F = stereo_calibrate(
+        objpoints_use, imgpoints_left, imgpoints_right, K1, D1, K2, D2, image_size, use_fisheye=args.fisheye
+    )
     t_stereo_end = time.time()
     print(f"Stereo calibration time: {(t_stereo_end - t_stereo_start):.2f}s")
     print(f"Stereo reprojection RMS: {s_err:.4f}")
     print(f"Baseline (m): {np.linalg.norm(T):.6f}")
 
     t_rect_start = time.time()
-    R1, R2, P1, P2, Q, roi1, roi2 = stereo_rectify(K1, D1, K2, D2, image_size, R, T)
-    map1x, map1y = cv2.initUndistortRectifyMap(K1, D1, R1, P1, image_size, cv2.CV_32FC1)
-    map2x, map2y = cv2.initUndistortRectifyMap(K2, D2, R2, P2, image_size, cv2.CV_32FC1)
+    R1, R2, P1, P2, Q, roi1, roi2 = stereo_rectify(K1, D1, K2, D2, image_size, R, T, use_fisheye=args.fisheye)
+    if args.fisheye:
+        map1x, map1y = cv2.fisheye.initUndistortRectifyMap(K1, D1, R1, P1, image_size, cv2.CV_32FC1)
+        map2x, map2y = cv2.fisheye.initUndistortRectifyMap(K2, D2, R2, P2, image_size, cv2.CV_32FC1)
+    else:
+        map1x, map1y = cv2.initUndistortRectifyMap(K1, D1, R1, P1, image_size, cv2.CV_32FC1)
+        map2x, map2y = cv2.initUndistortRectifyMap(K2, D2, R2, P2, image_size, cv2.CV_32FC1)
     t_rect_end = time.time()
     print(f"Rectification + maps time: {(t_rect_end - t_rect_start):.2f}s")
 
