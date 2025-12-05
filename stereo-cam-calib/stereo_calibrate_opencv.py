@@ -142,6 +142,7 @@ def main():
                         help="Chessboard inner corners: rows cols (e.g., 6 8)")
     parser.add_argument("--square-size", type=float, required=True, help="Square size in meters (e.g., 0.108)")
     parser.add_argument("--max-pairs", type=int, default=0, help="Limit number of pairs used (0 = all)")
+    parser.add_argument("--best-pairs", type=int, default=0, help="Quality-based selection: keep top N pairs by detection quality (0 = disabled)")
     parser.add_argument("--preview", action="store_true", help="Show corner detection and rectification previews")
     parser.add_argument("--save-prefix", default="stereo", help="Prefix for output YAML files")
     args = parser.parse_args()
@@ -176,6 +177,38 @@ def main():
     image_size = None
 
     t_detect_start = time.time()
+    # Optional: quality-based selection pre-pass
+    if args.best_pairs and args.best_pairs > 0:
+        t_q_start = time.time()
+        scored: List[Tuple[float, Tuple[Path, Path]]] = []
+        for lp, rp in pairs:
+            li = cv2.imread(str(lp), cv2.IMREAD_GRAYSCALE)
+            ri = cv2.imread(str(rp), cv2.IMREAD_GRAYSCALE)
+            if li is None or ri is None:
+                continue
+            ok_l, cl = find_corners(li, board_size)
+            ok_r, cr = find_corners(ri, board_size)
+            if not (ok_l and ok_r):
+                continue
+            # Sharpness via Laplacian variance
+            sharp_l = cv2.Laplacian(li, cv2.CV_64F).var()
+            sharp_r = cv2.Laplacian(ri, cv2.CV_64F).var()
+            # Corner spread: bounding box area to prefer wider coverage
+            def spread_score(corners: np.ndarray) -> float:
+                xs = corners[:, 0, 0]
+                ys = corners[:, 0, 1]
+                return float((xs.max() - xs.min()) * (ys.max() - ys.min()))
+            spread_l = spread_score(cl)
+            spread_r = spread_score(cr)
+            # Total score: weighted sum
+            score = 0.5 * (sharp_l + sharp_r) + 0.5 * (spread_l + spread_r)
+            scored.append((score, (lp, rp)))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        kept = [pair for _, pair in scored[:args.best_pairs]]
+        pairs = kept if kept else pairs
+        t_q_end = time.time()
+        print(f"Quality selection: kept {len(pairs)} pairs (scored {len(scored)}). Time: {(t_q_end - t_q_start):.2f}s")
+
     for i, (lp, rp) in enumerate(pairs, 1):
         left_img = cv2.imread(str(lp), cv2.IMREAD_COLOR)
         right_img = cv2.imread(str(rp), cv2.IMREAD_COLOR)
