@@ -49,3 +49,5 @@ Tips
 - Ensure left/right images are synchronized and the same resolution.
 - If detection fails, double-check `--pattern-size` and `--square-size`.
 - Use `--max-pairs` to limit to a clean subset while debugging.
+
+Camera used: 1080p USB2.0 UVC camera with ~130° wide angle (purchase link: https://www.amazon.com/dp/B0CNCSFQC1?ref=ppx_yo2ov_dt_b_fed_asin_title).
