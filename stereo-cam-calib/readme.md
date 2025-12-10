@@ -45,11 +45,18 @@ python "g:\GithubProject\ReconS\stereo-cam-calib\stereo_calibrate_opencv.py" `
 
 Output
 - One YAML saved alongside the left/right folders: `{save_prefix}_result.yaml` (default `stereo_result.yaml`).
-- Fields inside the YAML (float64):
-	- `K1`, `D1`, `K2`, `D2`: intrinsics and fisheye distortion for left/right.
-	- `R`, `T`: stereo rotation and translation (baseline = `norm(T)`, meters).
-	- `R1`, `R2`, `P1`, `P2`, `Q`: rectification, projection, and disparity-to-depth mapping.
-	- `rms`: stereo reprojection RMS reported by OpenCV.
+- Intrinsics (per camera):
+	- `K1`, `K2`: 3x3 camera matrices `[fx 0 cx; 0 fy cy; 0 0 1]`.
+	- `D1`, `D2`: fisheye distortion coefficients `[k1, k2, k3, k4]`.
+- Extrinsics (stereo relationship):
+	- `R`: 3x3 rotation from cam1 to cam2.
+	- `T`: 3x1 translation from cam1 to cam2 (meters); baseline = `norm(T)`.
+- Rectification and projection (used for undistort/rectify + depth):
+	- `R1`, `R2`: rectification rotations applied to each camera.
+	- `P1`, `P2`: 3x4 projection matrices after rectification (contain adjusted focal lengths, principals, and baseline shift in `P2[0,3]`).
+	- `Q`: 4x4 reprojection matrix to convert disparity to 3D points.
+- Quality metric:
+	- `rms`: stereo reprojection RMS reported by OpenCV (lower is better).
 
 Console Notes
 - Shows matched/valid pairs, detection time, RMS, baseline, and rectification time.
