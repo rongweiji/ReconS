@@ -1,0 +1,17 @@
+# Core numeric + plotting
+numpy>=1.24
+matplotlib>=3.7
+
+# Stereo calibration / image processing
+opencv-python>=4.8
+
+# YAML read/write (calibration outputs + meta generation)
+PyYAML>=6.0
+
+# 3D visualization (fallback viewer; works on Python 3.13)
+plotly>=5.18
+
+# Qt 3D viewer (primary viewer for `utilities/visualize_cusfm.py`)
+# Requires a Qt binding + OpenGL.
+# Install with:
+#   python -m pip install pyqtgraph PySide6 PyOpenGL

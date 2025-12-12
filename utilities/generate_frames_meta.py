@@ -20,6 +20,10 @@ except ImportError as exc:  # pragma: no cover - dependency check
     raise SystemExit("PyYAML is required to run this script. pip install pyyaml") from exc
 
 
+LEFT_CAMERA_PARAMS_ID = "0"
+RIGHT_CAMERA_PARAMS_ID = "1"
+
+
 def read_timestamps(path: Path) -> List[Dict[str, Any]]:
     entries: List[Dict[str, Any]] = []
     with path.open("r", encoding="utf-8") as f:
@@ -211,7 +215,7 @@ def build_keyframes(
         keyframes.append(
             {
                 "id": str(next_id),
-                "camera_params_id": "left_cam",
+                "camera_params_id": LEFT_CAMERA_PARAMS_ID,
                 "timestamp_microseconds": ts_us,
                 "image_name": f"{left_dir_name}/{filename}",
                 "camera_to_world": base_pose,
@@ -222,7 +226,7 @@ def build_keyframes(
         keyframes.append(
             {
                 "id": str(next_id),
-                "camera_params_id": "right_cam",
+                "camera_params_id": RIGHT_CAMERA_PARAMS_ID,
                 "timestamp_microseconds": ts_us,
                 "image_name": f"{right_dir_name}/{filename}",
                 "camera_to_world": right_pose,
@@ -265,7 +269,7 @@ def main() -> None:
     camera_params: Dict[str, Any] = {}
     camera_params.update(
         build_camera_params(
-            camera_id="left_cam",
+            camera_id=LEFT_CAMERA_PARAMS_ID,
             sensor_id=0,
             sensor_name=left_dir.name,
             image_size=image_size,
@@ -280,7 +284,7 @@ def main() -> None:
     )
     camera_params.update(
         build_camera_params(
-            camera_id="right_cam",
+            camera_id=RIGHT_CAMERA_PARAMS_ID,
             sensor_id=1,
             sensor_name=right_dir.name,
             image_size=image_size,
@@ -309,8 +313,8 @@ def main() -> None:
         "camera_params_id_to_camera_params": camera_params,
         "stereo_pair": [
             {
-                "left_camera_param_id": "left_cam",
-                "right_camera_param_id": "right_cam",
+                "left_camera_param_id": LEFT_CAMERA_PARAMS_ID,
+                "right_camera_param_id": RIGHT_CAMERA_PARAMS_ID,
                 "baseline_meters": baseline_m,
             }
         ],
