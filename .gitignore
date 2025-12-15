@@ -1,3 +1,8 @@
 data/
 stereo-cam-calib/cali_data1
 example_data/
+nvbox/data/
+.venv/
+nvblox_ex/data/**/frames_*/
+nvblox_ex/data/**/alignment_*.png
+nvblox_ex/data/**/alignment_*.json
