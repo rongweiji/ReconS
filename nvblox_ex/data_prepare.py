@@ -4,6 +4,7 @@ import argparse
 import csv
 import json
 import math
+import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterable, Optional
@@ -26,6 +27,8 @@ class VideoInfo:
     fps_reported: float
     frame_count_reported: int
     extracted_frames: int
+    rotated_to_landscape: bool
+    rotation_degrees_cw: int
     duration_sec_from_timestamps: float
     duration_sec_from_reported_fps: float
     dt_median_sec: float
@@ -120,14 +123,42 @@ def extract_video_frames(
 
     frame_count_reported = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
 
+    progress_every_decoded = 0
+    if frame_count_reported > 0:
+        # Aim for ~1% updates but avoid too-frequent prints on small videos.
+        progress_every_decoded = max(25, frame_count_reported // 100)
+    else:
+        # Fallback when container doesn't report frame count.
+        progress_every_decoded = 250
+
     timestamps_sec: list[float] = []
     written = 0
     idx = 0
+    rotated_to_landscape = False
+    rotation_degrees_cw = 0
 
     while True:
         ok, frame = cap.read()
         if not ok:
             break
+
+        if idx % progress_every_decoded == 0:
+            if frame_count_reported > 0:
+                pct = min(100.0, (idx / max(1, frame_count_reported)) * 100.0)
+                msg = f"Extracting frames: {pct:6.2f}% ({idx}/{frame_count_reported})"
+            else:
+                msg = f"Extracting frames: decoded={idx}"
+            print("\r" + msg, end="", file=sys.stdout, flush=True)
+
+        if idx == 0:
+            h, w = frame.shape[:2]
+            if w < h:
+                rotated_to_landscape = True
+                # Reverse direction: rotate left to make portrait -> landscape.
+                rotation_degrees_cw = 270
+
+        if rotated_to_landscape:
+            frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
 
         t_sec = float(cap.get(cv2.CAP_PROP_POS_MSEC) or 0.0) / 1000.0
         if not math.isfinite(t_sec) or t_sec <= 0.0:
@@ -147,6 +178,12 @@ def extract_video_frames(
             break
 
     cap.release()
+
+    # Finish the progress line.
+    if frame_count_reported > 0:
+        print("\r" + f"Extracting frames: 100.00% ({min(idx, frame_count_reported)}/{frame_count_reported})")
+    else:
+        print("\r" + f"Extracting frames: decoded={idx}")
 
     ts = np.asarray(timestamps_sec, dtype=np.float64)
     if ts.size == 0:
@@ -170,6 +207,8 @@ def extract_video_frames(
         fps_reported=fps_reported,
         frame_count_reported=frame_count_reported,
         extracted_frames=written,
+        rotated_to_landscape=rotated_to_landscape,
+        rotation_degrees_cw=rotation_degrees_cw,
         duration_sec_from_timestamps=duration_ts,
         duration_sec_from_reported_fps=duration_fps,
         dt_median_sec=dt_median,
@@ -318,7 +357,7 @@ def visualize_alignment(
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "Convert phone sample folder: extract video frames and visualize alignment with *_ar.csv."
+            "Convert phone sample folder: extract video frames, and optionally visualize alignment with *_ar.csv."
         )
     )
     parser.add_argument(
@@ -336,7 +375,10 @@ def main() -> int:
         "--ar",
         type=str,
         default=None,
-        help="Optional ar csv filename within input_folder; otherwise autodetected (*_ar.csv or ar.csv).",
+        help=(
+            "Optional AR csv filename within input_folder; otherwise autodetected (*_ar.csv or ar.csv). "
+            "If no AR csv is present, the script will only extract frames and skip alignment."
+        ),
     )
     parser.add_argument(
         "--frames-dir",
@@ -372,10 +414,10 @@ def main() -> int:
     ar_path: Optional[Path]
     if args.ar:
         ar_path = (input_folder / args.ar).resolve()
+        if not ar_path.exists():
+            raise FileNotFoundError(f"AR csv not found: {ar_path}")
     else:
         ar_path = _find_first_file(input_folder, ["*_ar.csv", "ar.csv"])
-    if not ar_path or not ar_path.exists():
-        raise FileNotFoundError(f"No AR csv found in {input_folder} (searched: *_ar.csv, ar.csv)")
 
     video_stem = video_path.stem
     frames_dir_name = args.frames_dir or f"frames_{video_stem}"
@@ -389,8 +431,22 @@ def main() -> int:
         frame_step=args.frame_step,
         max_frames=args.max_frames,
     )
-    ar_info, ar_t = analyze_ar(ar_path)
 
+    print("Input folder:", input_folder)
+    print("Video:", video_info.path)
+    print(
+        f"  fps_reported={video_info.fps_reported:.3f} extracted_frames={video_info.extracted_frames} "
+        f"duration_ts={video_info.duration_sec_from_timestamps:.3f}s dt_median={video_info.dt_median_sec*1000:.3f}ms "
+        f"dt_std={video_info.dt_std_sec*1000:.3f}ms"
+    )
+    print("Frames saved to:", frames_dir)
+
+    if not ar_path or not ar_path.exists():
+        print("AR: (not found)")
+        print("Skipping alignment (video-only sample).")
+        return 0
+
+    ar_info, ar_t = analyze_ar(ar_path)
     alignment_png = input_folder / f"alignment_{video_stem}.png"
     alignment_json = input_folder / f"alignment_{video_stem}.json"
     alignment = visualize_alignment(
@@ -402,13 +458,6 @@ def main() -> int:
         out_json=alignment_json,
     )
 
-    print("Input folder:", input_folder)
-    print("Video:", video_info.path)
-    print(
-        f"  fps_reported={video_info.fps_reported:.3f} extracted_frames={video_info.extracted_frames} "
-        f"duration_ts={video_info.duration_sec_from_timestamps:.3f}s dt_median={video_info.dt_median_sec*1000:.3f}ms "
-        f"dt_std={video_info.dt_std_sec*1000:.3f}ms"
-    )
     print("AR:", ar_info.path)
     print(
         f"  samples={ar_info.samples} rate_median={ar_info.rate_hz_median:.2f}Hz duration={ar_info.duration_sec:.3f}s "
@@ -422,7 +471,6 @@ def main() -> int:
         f"Nearest residual |ms|: p50={alignment.residual_ms_p50:.2f} p95={alignment.residual_ms_p95:.2f} "
         f"max={alignment.residual_ms_max_abs:.2f}"
     )
-    print("Frames saved to:", frames_dir)
     print("Alignment plot:", alignment_png)
     print("Alignment summary:", alignment_json)
     return 0

@@ -1,0 +1,1 @@
+1920x1440 : depth everything 600ms/frame large model , without xformers 
