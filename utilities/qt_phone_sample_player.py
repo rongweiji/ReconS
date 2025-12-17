@@ -1,4 +1,5 @@
 import csv
+import os
 import math
 import sys
 import time
@@ -20,6 +21,10 @@ class FrameRecord:
     depth_metric_path: Optional[Path]
     translation: Optional[np.ndarray] = None  # shape (3,)
     quaternion: Optional[np.ndarray] = None  # shape (4,) as (x, y, z, w)
+    matched_pose_timestamp: Optional[float] = None
+    matched_pose_abs_dt: Optional[float] = None
+    pose_match_exact: bool = False
+    inferred: bool = False
 
 
 @dataclass
@@ -177,6 +182,7 @@ def infer_missing_frames(base_dir: Path, records: List[FrameRecord]) -> List[Fra
                 rgb_path=rgb_path,
                 depth_color_path=depth_color_path,
                 depth_metric_path=depth_metric_path,
+                inferred=True,
             )
         )
 
@@ -289,7 +295,7 @@ class TrajectoryView(gl.GLViewWidget):
 
 
 class PlayerWindow(QtWidgets.QWidget):
-    def __init__(self, records: List[FrameRecord]):
+    def __init__(self, records: List[FrameRecord], alignment_report: Optional["AlignmentReport"] = None):
         super().__init__()
         self.records = records
         self.timestamps = np.array([r.timestamp for r in records], dtype=float)
@@ -327,9 +333,30 @@ class PlayerWindow(QtWidgets.QWidget):
         self.timer.timeout.connect(self.on_tick)
         self.timer.start(0)  # let Qt drive as fast as possible; we skip via timestamps
 
+        small_font = QtGui.QFont()
+        small_font.setPointSize(9)
+
+        self.info_label = QtWidgets.QLabel("")
+        self.info_label.setFont(small_font)
+        self.info_label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+
+        self.align_label = QtWidgets.QLabel("")
+        self.align_label.setFont(small_font)
+        self.align_label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+
+        self.check_align_btn = QtWidgets.QPushButton("Check alignment")
+        self.check_align_btn.setFont(small_font)
+        self.check_align_btn.setFixedHeight(22)
+        self.check_align_btn.clicked.connect(self.on_check_alignment)
+
+        self.alignment_report = alignment_report
+
         self._build_layout()
         self._precompute_traj()
         self.update_frame(0)
+
+        # Print + show summary once on startup.
+        self._apply_alignment_summary_to_ui(print_to_console=True)
 
     def _build_layout(self):
         grid = QtWidgets.QGridLayout()
@@ -338,19 +365,48 @@ class PlayerWindow(QtWidgets.QWidget):
         grid.addWidget(self.depth_metric_view, 0, 2)
         grid.addWidget(self.traj_view, 1, 0, 1, 3)
 
+        # Compact info panel directly under the 3D view
+        info_panel = QtWidgets.QWidget()
+        info_panel.setFixedHeight(24)
+        footer = QtWidgets.QHBoxLayout(info_panel)
+        footer.setContentsMargins(6, 0, 6, 0)
+        footer.setSpacing(8)
+        footer.addWidget(self.info_label, 1)
+
         controls = QtWidgets.QHBoxLayout()
+        controls.setContentsMargins(6, 0, 6, 0)
+        controls.setSpacing(8)
         controls.addWidget(self.play_btn)
         controls.addWidget(QtWidgets.QLabel("Frame"))
         controls.addWidget(self.slider, 1)
         controls.addWidget(QtWidgets.QLabel("Speed"))
         controls.addWidget(self.speed_box)
+        controls.addStretch(1)
+        controls.addWidget(self.align_label)
+        controls.addWidget(self.check_align_btn)
 
         layout = QtWidgets.QVBoxLayout()
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(6)
         layout.addLayout(grid)
+        layout.addWidget(info_panel)
         layout.addLayout(controls)
         self.setLayout(layout)
         self.setWindowTitle("Phone sample player")
         self.resize(1200, 800)
+
+    def _apply_alignment_summary_to_ui(self, print_to_console: bool = False):
+        rpt = self.alignment_report
+        if rpt is None:
+            self.align_label.setText("Alignment: (not checked)")
+            return
+
+        self.align_label.setText(rpt.summary_text())
+        if print_to_console:
+            print(rpt.to_console_report())
+
+    def on_check_alignment(self):
+        self._apply_alignment_summary_to_ui(print_to_console=True)
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
         if self.preloader.isRunning():
@@ -463,31 +519,278 @@ class PlayerWindow(QtWidgets.QWidget):
         if rec.translation is not None and rec.quaternion is not None:
             self.traj_view.update_camera(rec.translation, rec.quaternion)
 
+        # Per-frame status
+        pose_state = "MISSING"
+        pose_extra = ""
+        if rec.translation is not None and rec.quaternion is not None:
+            pose_state = "OK"
+            if rec.matched_pose_abs_dt is not None:
+                pose_extra = f" (Δt={rec.matched_pose_abs_dt * 1000.0:.1f}ms)"
+        inferred = " inferred" if rec.inferred else ""
+        self.info_label.setText(
+            f"Frame {idx + 1}/{len(self.records)}  t={rec.timestamp:.6f}s{inferred}  pose={pose_state}{pose_extra}"
+        )
 
-def build_records(base_dir: Path) -> List[FrameRecord]:
-    records = load_associations(base_dir)
-    records = infer_missing_frames(base_dir, records)
+
+@dataclass
+class AlignmentReport:
+    image_label: str
+    pose_label: str
+    image_count: int
+    pose_count: int
+    image_fps: Optional[float]
+    pose_fps: Optional[float]
+    image_dt_median: Optional[float]
+    pose_dt_median: Optional[float]
+    fps_diff_pct: Optional[float]
+    match_tolerance_s: float
+    matched: int
+    unmatched: int
+    abs_dt_median: Optional[float]
+    abs_dt_p95: Optional[float]
+    abs_dt_max: Optional[float]
+    image_gaps: int
+    pose_gaps: int
+    missing_images_in_associations: int
+    ok: bool
+    warnings: List[str]
+
+    def summary_text(self) -> str:
+        if self.pose_count == 0:
+            return "Alignment: NO POSES"
+        if self.image_count == 0:
+            return "Alignment: NO IMAGES"
+        if self.ok:
+            return "Alignment: OK"
+        return "Alignment: ISSUES (see console)"
+
+    def to_console_report(self) -> str:
+        lines: List[str] = []
+        lines.append("=== Timestamp Alignment Report ===")
+        lines.append(f"Images: {self.image_label}")
+        lines.append(f"Poses:  {self.pose_label}")
+        lines.append(f"Counts: images={self.image_count}, poses={self.pose_count}")
+        if self.image_fps is not None and self.pose_fps is not None:
+            lines.append(f"FPS:    images≈{self.image_fps:.3f}, poses≈{self.pose_fps:.3f}")
+        if self.fps_diff_pct is not None:
+            lines.append(f"FPS Δ:  {self.fps_diff_pct:.2f}%")
+        lines.append(f"Match tolerance: ±{self.match_tolerance_s * 1000.0:.1f}ms")
+        lines.append(f"Matches: {self.matched}/{self.image_count}  (unmatched={self.unmatched})")
+        if self.abs_dt_median is not None:
+            lines.append(
+                f"|Δt| stats: median={self.abs_dt_median * 1000.0:.2f}ms, "
+                f"p95={self.abs_dt_p95 * 1000.0:.2f}ms, max={self.abs_dt_max * 1000.0:.2f}ms"
+            )
+        lines.append(f"Gaps:  images={self.image_gaps}, poses={self.pose_gaps}")
+        if self.missing_images_in_associations:
+            lines.append(f"Missing images in associations.txt: {self.missing_images_in_associations}")
+        if self.warnings:
+            lines.append("Warnings:")
+            for w in self.warnings:
+                lines.append(f"- {w}")
+        lines.append(f"Overall: {'OK' if self.ok else 'NOT OK'}")
+        return "\n".join(lines)
+
+
+def _robust_median_dt(timestamps: np.ndarray) -> Optional[float]:
+    if timestamps.size < 2:
+        return None
+    ts = np.sort(timestamps.astype(float))
+    diffs = np.diff(ts)
+    diffs = diffs[diffs > 0]
+    if diffs.size == 0:
+        return None
+    return float(np.median(diffs))
+
+
+def _estimate_fps(timestamps: np.ndarray) -> tuple[Optional[float], Optional[float]]:
+    dt = _robust_median_dt(timestamps)
+    if dt is None or dt <= 0:
+        return None, dt
+    return 1.0 / dt, dt
+
+
+def _count_gaps(timestamps: np.ndarray, dt_median: Optional[float], gap_factor: float = 1.5) -> int:
+    if dt_median is None or timestamps.size < 2:
+        return 0
+    ts = np.sort(timestamps.astype(float))
+    diffs = np.diff(ts)
+    return int(np.sum(diffs > gap_factor * dt_median))
+
+
+def _nearest_abs_dts(query_ts: np.ndarray, ref_ts: np.ndarray) -> np.ndarray:
+    """For each query timestamp, compute abs(query - nearest(ref))."""
+    if query_ts.size == 0 or ref_ts.size == 0:
+        return np.array([], dtype=float)
+    q = np.sort(query_ts.astype(float))
+    r = np.sort(ref_ts.astype(float))
+    idxs = np.searchsorted(r, q)
+    out = np.empty_like(q, dtype=float)
+    for i, (ts, idx) in enumerate(zip(q, idxs)):
+        candidates = []
+        if idx > 0:
+            candidates.append(r[idx - 1])
+        if idx < r.size:
+            candidates.append(r[idx])
+        if not candidates:
+            out[i] = np.inf
+            continue
+        best = min(candidates, key=lambda x: abs(x - ts))
+        out[i] = abs(best - ts)
+    return out
+
+
+def diagnose_timestamp_alignment(
+    *,
+    image_ts: List[float],
+    pose_ts: List[float],
+    image_label: str,
+    pose_label: str,
+    missing_images_in_associations: int = 0,
+) -> AlignmentReport:
+    img = np.array(image_ts, dtype=float)
+    pose = np.array(pose_ts, dtype=float)
+
+    image_fps, image_dt = _estimate_fps(img)
+    pose_fps, pose_dt = _estimate_fps(pose)
+
+    fps_diff_pct = None
+    if image_fps is not None and pose_fps is not None and image_fps > 0:
+        fps_diff_pct = abs(pose_fps - image_fps) / image_fps * 100.0
+
+    # Use image cadence to set matching tolerance.
+    # If timestamps are aligned, nearest pose should be within ~half a frame.
+    if image_dt is None:
+        match_tol = 0.05
+    else:
+        match_tol = max(0.02, 0.5 * image_dt)
+
+    abs_dts = _nearest_abs_dts(img, pose)
+    if abs_dts.size:
+        abs_dt_median = float(np.median(abs_dts))
+        abs_dt_p95 = float(np.percentile(abs_dts, 95))
+        abs_dt_max = float(np.max(abs_dts))
+        matched = int(np.sum(abs_dts <= match_tol))
+        unmatched = int(np.sum(abs_dts > match_tol))
+    else:
+        abs_dt_median = abs_dt_p95 = abs_dt_max = None
+        matched = 0
+        unmatched = int(img.size) if img.size else 0
+
+    image_gaps = _count_gaps(img, image_dt)
+    pose_gaps = _count_gaps(pose, pose_dt)
+
+    warnings: List[str] = []
+    if pose.size == 0:
+        warnings.append("No pose timestamps found.")
+    if img.size == 0:
+        warnings.append("No image timestamps found.")
+    if fps_diff_pct is not None and fps_diff_pct > 5.0:
+        warnings.append(f"FPS mismatch looks high (Δ={fps_diff_pct:.2f}%).")
+    if unmatched and img.size:
+        warnings.append(f"{unmatched}/{img.size} images have no pose within tolerance.")
+    if image_gaps:
+        warnings.append(f"Detected {image_gaps} image timestamp gaps (likely missing frames/data).")
+    if pose_gaps:
+        warnings.append(f"Detected {pose_gaps} pose timestamp gaps (likely missing poses).")
+    if missing_images_in_associations:
+        warnings.append("Some RGB PNGs are missing from associations.txt.")
+
+    ok = True
+    if pose.size == 0 or img.size == 0:
+        ok = False
+    if fps_diff_pct is not None and fps_diff_pct > 5.0:
+        ok = False
+    if img.size and (unmatched / img.size) > 0.02:
+        ok = False
+    if abs_dt_p95 is not None and abs_dt_p95 > match_tol:
+        ok = False
+
+    return AlignmentReport(
+        image_label=image_label,
+        pose_label=pose_label,
+        image_count=int(img.size),
+        pose_count=int(pose.size),
+        image_fps=image_fps,
+        pose_fps=pose_fps,
+        image_dt_median=image_dt,
+        pose_dt_median=pose_dt,
+        fps_diff_pct=fps_diff_pct,
+        match_tolerance_s=match_tol,
+        matched=matched,
+        unmatched=unmatched,
+        abs_dt_median=abs_dt_median,
+        abs_dt_p95=abs_dt_p95,
+        abs_dt_max=abs_dt_max,
+        image_gaps=image_gaps,
+        pose_gaps=pose_gaps,
+        missing_images_in_associations=int(missing_images_in_associations),
+        ok=ok,
+        warnings=warnings,
+    )
+
+
+def _count_png_files(folder: Path) -> int:
+    if not folder.exists():
+        return 0
+    try:
+        # Fast path on Windows
+        return sum(1 for name in os.listdir(folder) if name.lower().endswith(".png"))
+    except OSError:
+        return 0
+
+
+def build_records(base_dir: Path) -> tuple[List[FrameRecord], AlignmentReport]:
+    assoc_records = load_associations(base_dir)
     poses = load_poses(base_dir)
-    # Merge pose info into frames using exact timestamp match first, then nearest neighbor
-    pose_times = sorted(poses.keys())
+
+    rgb_dir = assoc_records[0].rgb_path.parent if assoc_records else (base_dir / "")
+    rgb_png_count = _count_png_files(rgb_dir) if assoc_records else 0
+    missing_in_assoc = max(0, rgb_png_count - len(assoc_records)) if rgb_png_count else 0
+
+    report = diagnose_timestamp_alignment(
+        image_ts=[r.timestamp for r in assoc_records],
+        pose_ts=sorted(poses.keys()),
+        image_label="images (associations.txt)",
+        pose_label="poses (CameraTrajectory.csv)",
+        missing_images_in_associations=missing_in_assoc,
+    )
+
+    records = infer_missing_frames(base_dir, assoc_records)
+
+    # Merge pose info into frames using exact match first, then nearest neighbor within tolerance.
+    pose_times = np.array(sorted(poses.keys()), dtype=float)
     for rec in records:
+        if pose_times.size == 0:
+            continue
+
         if rec.timestamp in poses:
-            t, q = poses[rec.timestamp]
+            best_ts = rec.timestamp
+            rec.pose_match_exact = True
         else:
-            # nearest timestamp
-            idx = np.searchsorted(pose_times, rec.timestamp)
+            idx = int(np.searchsorted(pose_times, rec.timestamp))
             candidates = []
             if idx > 0:
-                candidates.append(pose_times[idx - 1])
-            if idx < len(pose_times):
-                candidates.append(pose_times[idx])
+                candidates.append(float(pose_times[idx - 1]))
+            if idx < int(pose_times.size):
+                candidates.append(float(pose_times[idx]))
             if not candidates:
                 continue
             best_ts = min(candidates, key=lambda ts: abs(ts - rec.timestamp))
-            t, q = poses[best_ts]
+
+        abs_dt = abs(best_ts - rec.timestamp)
+        rec.matched_pose_timestamp = best_ts
+        rec.matched_pose_abs_dt = abs_dt
+
+        if abs_dt > report.match_tolerance_s:
+            # Too far: treat as missing pose for this frame.
+            continue
+
+        t, q = poses[best_ts]
         rec.translation = t
         rec.quaternion = q / np.linalg.norm(q)
-    return records
+
+    return records, report
 
 
 def main():
@@ -499,13 +802,13 @@ def main():
         print(f"Path not found: {base_dir}")
         sys.exit(1)
 
-    records = build_records(base_dir)
+    records, report = build_records(base_dir)
     if not records:
         print("No frames found.")
         sys.exit(1)
 
     app = QtWidgets.QApplication(sys.argv)
-    win = PlayerWindow(records)
+    win = PlayerWindow(records, alignment_report=report)
     win.show()
     sys.exit(app.exec())
 
