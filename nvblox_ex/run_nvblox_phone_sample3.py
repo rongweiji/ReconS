@@ -24,6 +24,8 @@ from typing import Dict, Iterable, Tuple
 import cv2
 import numpy as np
 import torch
+import sys
+import time
 
 
 def _read_intrinsics_json(path: Path, *, width: int, height: int) -> np.ndarray:
@@ -41,48 +43,135 @@ def _read_intrinsics_json(path: Path, *, width: int, height: int) -> np.ndarray:
     raise ValueError(f"No matching intrinsics for {width}x{height} in {path}")
 
 
-class LiveMeshViewer:
-    """Minimal Open3D-based live mesh viewer."""
+class QtMeshViewer:
+    """Qt/pyqtgraph mesh viewer that avoids GLFW/GLEW issues on WSLg."""
 
-    def __init__(self, title: str = "nvblox mesh", width: int = 960, height: int = 720):
+    def __init__(self, title: str = "nvblox mesh"):
+        # Lazy imports so headless mode stays lightweight
         try:
-            import open3d as o3d  # type: ignore
-        except ModuleNotFoundError as exc:  # pragma: no cover - optional dep
+            from PySide6 import QtGui, QtWidgets  # type: ignore
+            import pyqtgraph.opengl as gl  # type: ignore
+        except ModuleNotFoundError as exc:
             raise ImportError(
-                "Open3D is required for --ui. Install with: python -m pip install open3d"
+                "Qt viewer requires PySide6 and pyqtgraph. Install with: "
+                "python -m pip install PySide6 pyqtgraph PyOpenGL"
             ) from exc
 
-        self.o3d = o3d
-        self.vis = o3d.visualization.Visualizer()
-        self.vis.create_window(window_name=title, width=width, height=height)
-        self.mesh_handle = None
+        self.QtWidgets = QtWidgets
+        self.gl = gl
+        self.app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
 
-    def update(self, mesh_o3d):
-        if mesh_o3d is None:
-            return
-        if self.mesh_handle is None:
-            self.mesh_handle = mesh_o3d
-            self.vis.add_geometry(self.mesh_handle)
-        else:
-            # Replace geometry to avoid mutable references issues
-            self.vis.remove_geometry(self.mesh_handle, reset_bounding_box=False)
-            self.mesh_handle = mesh_o3d
-            self.vis.add_geometry(self.mesh_handle)
-        self.vis.poll_events()
-        self.vis.update_renderer()
+        self.view = gl.GLViewWidget()
+        self.view.setCameraPosition(distance=3)
+        grid = gl.GLGridItem()
+        grid.setSize(4, 4)
+        grid.setSpacing(0.5, 0.5)
+        self.view.addItem(grid)
+
+        self.mesh_item = None
+        self.pose_items: list = []
+        self.path_item = None
+        self.light_pos: np.ndarray | None = None  # point light in world coords
+        self.window = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout()
+        layout.addWidget(self.view)
+        self.window.setLayout(layout)
+        self.window.setWindowTitle(title)
+        self.window.resize(1200, 900)
+
+    def show(self):
+        self.window.show()
+        self.process_events()
+
+    def process_events(self):
+        self.app.processEvents()
 
     def refresh(self):
-        if self.mesh_handle is None:
+        self.process_events()
+
+    def set_light_position(self, pos: np.ndarray):
+        self.light_pos = pos.astype(np.float32)
+
+    @staticmethod
+    def _compute_vertex_normals(verts: np.ndarray, faces: np.ndarray) -> np.ndarray:
+        normals = np.zeros_like(verts, dtype=np.float32)
+        tris = verts[faces]
+        face_normals = np.cross(tris[:, 1] - tris[:, 0], tris[:, 2] - tris[:, 0])
+        for i in range(3):
+            np.add.at(normals, faces[:, i], face_normals)
+        norm = np.linalg.norm(normals, axis=1, keepdims=True) + 1e-12
+        normals /= norm
+        return normals
+
+    def update_mesh(self, verts: np.ndarray, faces: np.ndarray, colors: np.ndarray | None):
+        # Remove existing mesh item if present
+        if self.mesh_item is not None:
+            self.view.removeItem(self.mesh_item)
+        # Compute simple Lambertian shading for better shape perception.
+        normals = self._compute_vertex_normals(verts, faces)
+        if self.light_pos is not None:
+            vec = self.light_pos[None, :] - verts
+            vec_norm = np.linalg.norm(vec, axis=1, keepdims=True) + 1e-9
+            light_dir = vec / vec_norm
+        else:
+            light_dir = np.array([[0.3, 0.3, 0.9]], dtype=np.float32)
+            light_dir = light_dir / (np.linalg.norm(light_dir) + 1e-9)
+        intensity = np.clip((normals * light_dir).sum(axis=1, keepdims=True) * 0.7 + 0.3, 0.1, 1.0)
+        base_color = np.array([0.7, 0.8, 0.9], dtype=np.float32)
+        shaded = np.clip(base_color * intensity, 0.0, 1.0)
+        colors_rgba = np.concatenate([shaded, np.ones((shaded.shape[0], 1), dtype=np.float32)], axis=1)
+
+        mesh_kwargs = dict(
+            vertexes=verts,
+            faces=faces,
+            smooth=True,
+            drawEdges=True,
+            edgeColor=(0.2, 0.2, 0.2, 0.6),
+            computeNormals=False,
+            vertexColors=colors_rgba,
+            glOptions="opaque",
+        )
+        self.mesh_item = self.gl.GLMeshItem(**mesh_kwargs)
+        self.view.addItem(self.mesh_item)
+        self.process_events()
+
+    def exec(self):
+        return self.app.exec()
+
+    def update_pose_axes(self, pose: np.ndarray, axis_len: float = 0.2):
+        # Clear existing
+        for item in self.pose_items:
+            self.view.removeItem(item)
+        self.pose_items = []
+        t = pose[:3, 3]
+        R = pose[:3, :3]
+        axes = [
+            ((1.0, 0.0, 0.0, 1.0), R @ (axis_len * np.array([1.0, 0.0, 0.0]))),  # X red
+            ((0.0, 1.0, 0.0, 1.0), R @ (axis_len * np.array([0.0, 1.0, 0.0]))),  # Y green
+            ((0.0, 0.0, 1.0, 1.0), R @ (axis_len * np.array([0.0, 0.0, 1.0]))),  # Z blue
+        ]
+        for color, direction in axes:
+            pos = np.vstack([t, t + direction])
+            item = self.gl.GLLinePlotItem(pos=pos, color=color, width=3, antialias=True)
+            self.view.addItem(item)
+            self.pose_items.append(item)
+
+    def update_path(self, points: np.ndarray):
+        if points.shape[0] < 2:
             return
-        self.vis.poll_events()
-        self.vis.update_renderer()
-
-    def run_forever(self):
-        while self.vis.poll_events():
-            self.vis.update_renderer()
-
-    def close(self):
-        self.vis.destroy_window()
+        if self.path_item is None:
+            # z=inf forces it to render on top (pyqtgraph convention).
+            self.path_item = self.gl.GLLinePlotItem(
+                pos=points,
+                color=(1.0, 0.0, 0.0, 1.0),
+                width=2,
+                antialias=True,
+                glOptions="translucent",
+            )
+            self.view.addItem(self.path_item)
+        else:
+            self.path_item.setData(pos=points)
+        self.process_events()
 
 
 def _read_camera_trajectory_csv(path: Path) -> Dict[float, Tuple[np.ndarray, np.ndarray]]:
@@ -249,8 +338,11 @@ def main() -> int:
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
     intrinsics: np.ndarray | None = None
-    viewer: LiveMeshViewer | None = LiveMeshViewer() if args.ui else None
+    viewer: QtMeshViewer | None = QtMeshViewer() if args.ui else None
+    if viewer:
+        viewer.show()
     prev_pose: np.ndarray | None = None
+    path_points: list[np.ndarray] = []
     # Use median frame spacing as tolerance for nearest pose lookup.
     if len(ts_sorted) > 1:
         tol = float(np.median(np.diff(ts_sorted)) * 0.51)
@@ -293,12 +385,16 @@ def main() -> int:
         if args.invert_pose:
             pose = np.linalg.inv(pose)
 
+        if viewer and viewer.light_pos is None:
+            viewer.set_light_position(pose[:3, 3])
+
         if args.skip_static_poses and not _pose_changed(prev_pose, pose):
             if viewer:
                 viewer.refresh()
             print(f"Skipped frame {idx} (t={ts:.6f}) - static pose")
             continue
         prev_pose = pose
+        path_points.append(pose[:3, 3].copy())
 
         # Mapper expects depth/color on GPU, intrinsics and pose on CPU.
         depth_t = torch.from_numpy(depth_m).to(device=device, dtype=torch.float32)
@@ -306,25 +402,41 @@ def main() -> int:
         pose_t = torch.from_numpy(pose).to(device="cpu", dtype=torch.float32)
         intrinsics_t = torch.from_numpy(intrinsics).to(device="cpu", dtype=torch.float32)
 
+        t_int0 = time.perf_counter()
         mapper.add_depth_frame(depth_t, pose_t, intrinsics_t)
         mapper.add_color_frame(rgb_t, pose_t, intrinsics_t)
+        dt_int_ms = (time.perf_counter() - t_int0) * 1000.0
+
+        if viewer:
+            viewer.update_pose_axes(pose)
+            if path_points:
+                viewer.update_path(np.vstack(path_points))
 
         if args.mesh_every > 0 and (idx % int(args.mesh_every) == 0):
+            t0 = time.perf_counter()
             mapper.update_color_mesh()
             mesh = mapper.get_color_mesh().to_open3d()
             if viewer:
-                viewer.update(mesh)
-            print(f"Integrated frame {idx} (t={ts:.6f}) - updated mesh")
+                verts = np.asarray(mesh.vertices, dtype=np.float32)
+                faces = np.asarray(mesh.triangles, dtype=np.int32)
+                viewer.update_mesh(verts, faces, None)
+            dt_mesh = (time.perf_counter() - t0) * 1000.0
+            print(f"Integrated frame {idx} (t={ts:.6f}) - integ {dt_int_ms:.1f} ms, mesh {dt_mesh:.1f} ms")
         else:
             if viewer:
-                viewer.refresh()
-            print(f"Integrated frame {idx} (t={ts:.6f})")
+                viewer.process_events()
+            print(f"Integrated frame {idx} (t={ts:.6f}) - integ {dt_int_ms:.1f} ms")
 
     # Final mesh update and export if available.
     mapper.update_color_mesh()
     final_mesh = mapper.get_color_mesh().to_open3d()
     if viewer:
-        viewer.update(final_mesh)
+        verts = np.asarray(final_mesh.vertices, dtype=np.float32)
+        faces = np.asarray(final_mesh.triangles, dtype=np.int32)
+        viewer.update_mesh(verts, faces, None)
+        viewer.update_pose_axes(np.eye(4, dtype=np.float32))
+        if path_points:
+            viewer.update_path(np.vstack(path_points))
 
     # Export: API name differs across versions. Try mapper methods first, then fall back to ColorMesh.save.
     out_mesh = args.out_dir / "mesh.ply"
@@ -352,8 +464,7 @@ def main() -> int:
 
     if viewer:
         print("Live viewer running; close the window to exit.")
-        viewer.run_forever()
-        viewer.close()
+        return viewer.exec()
 
     return 0
 
