@@ -6,3 +6,4 @@ nvbox/data/
 nvblox_ex/data/**/frames_*/
 nvblox_ex/data/**/alignment_*.png
 nvblox_ex/data/**/alignment_*.json
+utilities/__pycache__/
