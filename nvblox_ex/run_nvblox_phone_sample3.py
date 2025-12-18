@@ -150,6 +150,9 @@ class QtMeshViewer:
         if self.mesh_item is not None:
             self.view.removeItem(self.mesh_item)
             self.mesh_item = None
+        if self.slice_plane_item is not None:
+            self.view.removeItem(self.slice_plane_item)
+            self.slice_plane_item = None
         if self.field_item is None:
             self.field_item = self.gl.GLScatterPlotItem(pos=xyz, color=rgba, size=2.0, pxMode=True)
             self.view.addItem(self.field_item)
@@ -331,6 +334,13 @@ def _make_ground_aligned_slice(
     return pts.reshape(-1, 3).astype(np.float32)
 
 
+def _downsample_points(xyz: np.ndarray, rgba: np.ndarray, max_points: int) -> tuple[np.ndarray, np.ndarray]:
+    if xyz.shape[0] <= max_points:
+        return xyz, rgba
+    idx = np.random.choice(xyz.shape[0], size=max_points, replace=False)
+    return xyz[idx], rgba[idx]
+
+
 def _make_plane_slice(
     origin: np.ndarray,
     forward_hint: np.ndarray,
@@ -467,7 +477,7 @@ def main() -> int:
     parser.add_argument("--out_dir", type=Path, default=Path("outputs_nvblox"))
     parser.add_argument("--invert_pose", action="store_true", help="Invert poses before integration (if your trajectory is T_C_W)")
     parser.add_argument("--ui", action="store_true", help="Show live mesh viewer (requires open3d)")
-    parser.add_argument("--mode", choices=["mesh", "esdf"], default="mesh", help="What to visualize in the UI")
+    parser.add_argument("--mode", choices=["mesh", "esdf", "voxel"], default="mesh", help="What to visualize in the UI")
     parser.add_argument(
         "--color_mode",
         choices=["mesh", "solid"],
@@ -479,6 +489,24 @@ def main() -> int:
         type=float,
         default=0.0,
         help="ESDF/TSDF slice sampling step in meters (0 => use 2*voxel_size_m). Smaller => higher resolution, slower.",
+    )
+    parser.add_argument(
+        "--voxel_band_m",
+        type=float,
+        default=0.03,
+        help="Voxel mode: show voxels with |tsdf| < this band (meters).",
+    )
+    parser.add_argument(
+        "--voxel_radius_m",
+        type=float,
+        default=6.0,
+        help="Voxel mode: only visualize voxels within this radius of the current pose (meters).",
+    )
+    parser.add_argument(
+        "--voxel_max_points",
+        type=int,
+        default=50000,
+        help="Voxel mode: downsample to at most this many points for UI performance.",
     )
 
     args = parser.parse_args()
@@ -541,6 +569,9 @@ def main() -> int:
             raise RuntimeError("This nvblox_torch build does not expose query_differentiable_layer; cannot visualize ESDF.")
         if not hasattr(mapper, "update_esdf"):
             raise RuntimeError("This nvblox_torch build does not expose update_esdf; cannot visualize ESDF.")
+    if args.mode == "voxel":
+        if not hasattr(mapper, "tsdf_layer_view"):
+            raise RuntimeError("This nvblox_torch build does not expose tsdf_layer_view; cannot visualize voxels.")
     # Use median frame spacing as tolerance for nearest pose lookup.
     if len(ts_sorted) > 1:
         tol = float(np.median(np.diff(ts_sorted)) * 0.51)
@@ -651,7 +682,7 @@ def main() -> int:
                         if vcolors.max() > 1.0:
                             vcolors = vcolors / 255.0
                     viewer.update_mesh(verts, faces, vcolors, use_vertex_colors=args.color_mode == "mesh")
-            else:
+            elif args.mode == "esdf":
                 mapper.update_esdf()
                 qtype = QueryType.ESDF
 
@@ -693,7 +724,96 @@ def main() -> int:
 
                     rgba = np.concatenate([colors_rgb, np.ones((colors_rgb.shape[0], 1), dtype=np.float32)], axis=1)
                     if viewer:
+                        xyz_vis, rgba = _downsample_points(
+                            xyz_vis.astype(np.float32), rgba.astype(np.float32), int(args.voxel_max_points)
+                        )
                         viewer.update_field_points(xyz_vis.astype(np.float32), rgba.astype(np.float32))
+            elif args.mode == "voxel":
+                # Voxel mode: visualize a local band of TSDF voxels near the surface.
+                tsdf_layer = mapper.tsdf_layer_view()
+                if not hasattr(tsdf_layer, "get_all_blocks"):
+                    raise RuntimeError("This nvblox_torch build does not expose TsdfLayer.get_all_blocks; cannot visualize voxels.")
+
+                blocks, indices = tsdf_layer.get_all_blocks()
+                block_dim = int(tsdf_layer.block_dim_in_voxels)
+                voxel_size = float(tsdf_layer.voxel_size())
+                band = float(args.voxel_band_m)
+                radius = float(args.voxel_radius_m)
+                radius2 = radius * radius
+
+                pose_pos_t = torch.tensor(pose[:3, 3], device="cuda", dtype=torch.float32)
+
+                # Indices returned by nvblox_torch are typically List[torch.Tensor] (each shape (3,)).
+                if isinstance(indices, torch.Tensor):
+                    idxs = indices.to(device="cuda", dtype=torch.int32)
+                elif isinstance(indices, (list, tuple)) and (len(indices) == 0 or isinstance(indices[0], torch.Tensor)):
+                    idxs = torch.stack(
+                        [i.to(device="cuda", dtype=torch.int32) for i in indices],
+                        dim=0,
+                    ) if len(indices) > 0 else torch.empty((0, 3), device="cuda", dtype=torch.int32)
+                else:
+                    idxs = torch.tensor(indices, device="cuda", dtype=torch.int32)
+
+                # Blocks returned by nvblox_torch are typically List[torch.Tensor].
+                blocks_iter = blocks if isinstance(blocks, (list, tuple)) else [b for b in blocks]
+
+                pts_accum: list[torch.Tensor] = []
+                val_accum: list[torch.Tensor] = []
+
+                block_size_m = block_dim * voxel_size
+                block_radius_m = (3.0 ** 0.5) * 0.5 * block_size_m
+                max_block_center_dist2 = (radius + block_radius_m) ** 2
+
+                for block, bidx in zip(blocks_iter, idxs):
+                    block = block.to(device="cuda")
+                    if block.shape[-1] < 2:
+                        continue
+
+                    bidx_f = bidx.to(torch.float32)
+                    block_center_vox = bidx_f * block_dim + (block_dim * 0.5)
+                    block_center_m = (block_center_vox + 0.5) * voxel_size
+                    if torch.sum((block_center_m - pose_pos_t) ** 2).item() > max_block_center_dist2:
+                        continue
+
+                    tsdf = block[..., 0]
+                    w = block[..., 1]
+                    mask = (w > 0) & (torch.abs(tsdf) < band)
+                    if not torch.any(mask):
+                        continue
+
+                    coords = torch.nonzero(mask, as_tuple=False).to(torch.float32)  # (N,3)
+                    gv = bidx_f[None, :] * block_dim + coords + 0.5
+                    centers = gv * voxel_size
+                    d2 = torch.sum((centers - pose_pos_t[None, :]) ** 2, dim=1)
+                    keep = d2 < radius2
+                    if not torch.any(keep):
+                        continue
+
+                    centers = centers[keep]
+                    tsdf_vals = tsdf[mask].reshape(-1)[keep]
+                    pts_accum.append(centers)
+                    val_accum.append(tsdf_vals)
+
+                if pts_accum and viewer:
+                    xyz_t = torch.cat(pts_accum, dim=0)
+                    v_t = torch.cat(val_accum, dim=0)
+                    # Color by TSDF sign: negative red-ish, positive cyan-ish.
+                    v = torch.clamp(v_t / band, -1.0, 1.0)
+                    neg = (v < 0).to(torch.float32)
+                    pos = 1.0 - neg
+                    rgb = torch.stack(
+                        [
+                            0.9 * neg + 0.2 * pos,
+                            0.2 * neg + 0.9 * pos,
+                            0.2 * neg + 0.9 * pos,
+                        ],
+                        dim=1,
+                    )
+                    rgba_t = torch.cat([rgb, torch.ones((rgb.shape[0], 1), device="cuda", dtype=torch.float32)], dim=1)
+                    xyz = xyz_t.detach().cpu().numpy().astype(np.float32)
+                    rgba = rgba_t.detach().cpu().numpy().astype(np.float32)
+                    xyz, rgba = _downsample_points(xyz, rgba, int(args.voxel_max_points))
+                    viewer.update_field_points(xyz, rgba)
             dt_mesh = (time.perf_counter() - t0) * 1000.0
             print(f"Integrated frame {idx} (t={ts:.6f}) - integ {dt_int_ms:.1f} ms, vis {dt_mesh:.1f} ms")
         else:
