@@ -63,6 +63,7 @@ class QtMeshViewer:
 
         self.view = gl.GLViewWidget()
         self.view.setCameraPosition(distance=3)
+        self.view.setBackgroundColor('k')
         grid = gl.GLGridItem()
         grid.setSize(4, 4)
         grid.setSpacing(0.5, 0.5)
@@ -103,7 +104,7 @@ class QtMeshViewer:
         normals /= norm
         return normals
 
-    def update_mesh(self, verts: np.ndarray, faces: np.ndarray, colors: np.ndarray | None):
+    def update_mesh(self, verts: np.ndarray, faces: np.ndarray, colors: np.ndarray | None, use_vertex_colors: bool = True):
         # Remove existing mesh item if present
         if self.mesh_item is not None:
             self.view.removeItem(self.mesh_item)
@@ -117,9 +118,16 @@ class QtMeshViewer:
             light_dir = np.array([[0.3, 0.3, 0.9]], dtype=np.float32)
             light_dir = light_dir / (np.linalg.norm(light_dir) + 1e-9)
         intensity = np.clip((normals * light_dir).sum(axis=1, keepdims=True) * 0.7 + 0.3, 0.1, 1.0)
-        base_color = np.array([0.7, 0.8, 0.9], dtype=np.float32)
-        shaded = np.clip(base_color * intensity, 0.0, 1.0)
-        colors_rgba = np.concatenate([shaded, np.ones((shaded.shape[0], 1), dtype=np.float32)], axis=1)
+        if use_vertex_colors and colors is not None:
+            base_color = colors
+            if base_color.shape[1] == 3:
+                base_color = np.concatenate([base_color, np.ones((base_color.shape[0], 1), dtype=np.float32)], axis=1)
+            shaded = np.clip(base_color * intensity, 0.0, 1.0)
+        else:
+            base_color = np.array([0.7, 0.8, 0.9], dtype=np.float32)
+            shaded = np.clip(base_color * intensity, 0.0, 1.0)
+            shaded = np.concatenate([shaded, np.ones((shaded.shape[0], 1), dtype=np.float32)], axis=1)
+        colors_rgba = shaded
 
         mesh_kwargs = dict(
             vertexes=verts,
@@ -166,7 +174,7 @@ class QtMeshViewer:
                 color=(1.0, 0.0, 0.0, 1.0),
                 width=2,
                 antialias=True,
-                glOptions="translucent",
+                glOptions="opaque",
             )
             self.view.addItem(self.path_item)
         else:
@@ -289,9 +297,10 @@ def main() -> int:
     parser.add_argument("--invert_pose", action="store_true", help="Invert poses before integration (if your trajectory is T_C_W)")
     parser.add_argument("--ui", action="store_true", help="Show live mesh viewer (requires open3d)")
     parser.add_argument(
-        "--skip_static_poses",
-        action="store_true",
-        help="Skip frames whose pose is effectively identical to the previous frame (helps when trajectory has stalls)",
+        "--color_mode",
+        choices=["mesh", "solid"],
+        default="mesh",
+        help="Mesh coloring in UI: 'mesh' uses fused vertex colors; 'solid' uses a fixed shaded color",
     )
 
     args = parser.parse_args()
@@ -388,7 +397,8 @@ def main() -> int:
         if viewer and viewer.light_pos is None:
             viewer.set_light_position(pose[:3, 3])
 
-        if args.skip_static_poses and not _pose_changed(prev_pose, pose):
+        # Always skip frames with unchanged poses (common in phone logs during tracking stalls).
+        if not _pose_changed(prev_pose, pose):
             if viewer:
                 viewer.refresh()
             print(f"Skipped frame {idx} (t={ts:.6f}) - static pose")
@@ -419,7 +429,12 @@ def main() -> int:
             if viewer:
                 verts = np.asarray(mesh.vertices, dtype=np.float32)
                 faces = np.asarray(mesh.triangles, dtype=np.int32)
-                viewer.update_mesh(verts, faces, None)
+                vcolors = None
+                if mesh.has_vertex_colors():
+                    vcolors = np.asarray(mesh.vertex_colors, dtype=np.float32)
+                    if vcolors.max() > 1.0:
+                        vcolors = vcolors / 255.0
+                viewer.update_mesh(verts, faces, vcolors, use_vertex_colors=args.color_mode == "mesh")
             dt_mesh = (time.perf_counter() - t0) * 1000.0
             print(f"Integrated frame {idx} (t={ts:.6f}) - integ {dt_int_ms:.1f} ms, mesh {dt_mesh:.1f} ms")
         else:
@@ -433,7 +448,12 @@ def main() -> int:
     if viewer:
         verts = np.asarray(final_mesh.vertices, dtype=np.float32)
         faces = np.asarray(final_mesh.triangles, dtype=np.int32)
-        viewer.update_mesh(verts, faces, None)
+        vcolors = None
+        if final_mesh.has_vertex_colors():
+            vcolors = np.asarray(final_mesh.vertex_colors, dtype=np.float32)
+            if vcolors.max() > 1.0:
+                vcolors = vcolors / 255.0
+        viewer.update_mesh(verts, faces, vcolors, use_vertex_colors=args.color_mode == "mesh")
         viewer.update_pose_axes(np.eye(4, dtype=np.float32))
         if path_points:
             viewer.update_path(np.vstack(path_points))
