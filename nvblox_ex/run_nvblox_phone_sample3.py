@@ -72,6 +72,8 @@ class QtMeshViewer:
         self.mesh_item = None
         self.pose_items: list = []
         self.path_item = None
+        self.field_item = None
+        self.slice_plane_item = None
         self.light_pos: np.ndarray | None = None  # point light in world coords
         self.window = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout()
@@ -143,6 +145,55 @@ class QtMeshViewer:
         self.view.addItem(self.mesh_item)
         self.process_events()
 
+    def update_field_points(self, xyz: np.ndarray, rgba: np.ndarray):
+        """Display a colored point cloud (for ESDF/TSDF slices)."""
+        if self.mesh_item is not None:
+            self.view.removeItem(self.mesh_item)
+            self.mesh_item = None
+        if self.field_item is None:
+            self.field_item = self.gl.GLScatterPlotItem(pos=xyz, color=rgba, size=2.0, pxMode=True)
+            self.view.addItem(self.field_item)
+        else:
+            self.field_item.setData(pos=xyz, color=rgba, size=2.0, pxMode=True)
+        self.process_events()
+
+    def update_slice_plane(
+        self,
+        origin: np.ndarray,
+        forward_hint: np.ndarray,
+        *,
+        normal: np.ndarray,
+        ahead_m: float,
+        behind_m: float,
+        half_width_m: float,
+    ):
+        """Draw a semi-transparent plane showing where ESDF/TSDF is queried."""
+        if self.slice_plane_item is not None:
+            self.view.removeItem(self.slice_plane_item)
+            self.slice_plane_item = None
+
+        f, r, _n_u = _plane_basis(forward_hint, normal=normal)
+        o = origin.astype(np.float32)
+        p0 = o + (-behind_m) * f + (-half_width_m) * r
+        p1 = o + (ahead_m) * f + (-half_width_m) * r
+        p2 = o + (ahead_m) * f + (half_width_m) * r
+        p3 = o + (-behind_m) * f + (half_width_m) * r
+        verts = np.vstack([p0, p1, p2, p3]).astype(np.float32)
+        faces = np.array([[0, 1, 2], [0, 2, 3]], dtype=np.int32)
+        colors = np.tile(np.array([[0.2, 0.2, 0.2, 0.25]], dtype=np.float32), (4, 1))
+        self.slice_plane_item = self.gl.GLMeshItem(
+            vertexes=verts,
+            faces=faces,
+            vertexColors=colors,
+            smooth=False,
+            drawEdges=True,
+            edgeColor=(0.4, 0.4, 0.4, 0.5),
+            glOptions="translucent",
+            computeNormals=True,
+        )
+        self.view.addItem(self.slice_plane_item)
+        self.process_events()
+
     def exec(self):
         return self.app.exec()
 
@@ -180,6 +231,126 @@ class QtMeshViewer:
         else:
             self.path_item.setData(pos=points)
         self.process_events()
+
+
+def _colormap_plasma01(x: np.ndarray) -> np.ndarray:
+    """Approximate 'plasma' colormap for x in [0, 1]. Returns RGB in [0,1]."""
+    x = np.clip(x, 0.0, 1.0).astype(np.float32)
+    # Anchor points sampled from a plasma-like palette.
+    xp = np.array([0.0, 0.25, 0.5, 0.75, 1.0], dtype=np.float32)
+    cp = np.array(
+        [
+            [0.05, 0.03, 0.53],
+            [0.45, 0.12, 0.68],
+            [0.75, 0.27, 0.50],
+            [0.95, 0.53, 0.25],
+            [0.99, 0.91, 0.14],
+        ],
+        dtype=np.float32,
+    )
+    rgb = np.stack([np.interp(x, xp, cp[:, 0]), np.interp(x, xp, cp[:, 1]), np.interp(x, xp, cp[:, 2])], axis=1)
+    return rgb
+
+
+def _make_xy_slice(bounds_min: np.ndarray, bounds_max: np.ndarray, z: float, step: float) -> np.ndarray:
+    x0, y0 = float(bounds_min[0]), float(bounds_min[1])
+    x1, y1 = float(bounds_max[0]), float(bounds_max[1])
+    if x1 <= x0 or y1 <= y0:
+        return np.zeros((0, 3), dtype=np.float32)
+    xs = np.arange(x0, x1, step, dtype=np.float32)
+    ys = np.arange(y0, y1, step, dtype=np.float32)
+    if xs.size == 0 or ys.size == 0:
+        return np.zeros((0, 3), dtype=np.float32)
+    xg, yg = np.meshgrid(xs, ys, indexing="xy")
+    zg = np.full_like(xg, float(z), dtype=np.float32)
+    pts = np.stack([xg, yg, zg], axis=-1).reshape(-1, 3)
+    return pts
+
+
+def _normalize(v: np.ndarray, eps: float = 1e-9) -> np.ndarray:
+    n = float(np.linalg.norm(v))
+    if n < eps:
+        return v * 0.0
+    return v / n
+
+
+def _project_to_plane(v: np.ndarray, n_unit: np.ndarray) -> np.ndarray:
+    return v - n_unit * float(np.dot(v, n_unit))
+
+
+def _ground_basis(forward_hint: np.ndarray, *, up: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return (forward, right, up_unit) for a ground-parallel plane."""
+    up_u = _normalize(up.astype(np.float32))
+    f = _project_to_plane(forward_hint.astype(np.float32), up_u)
+    f = _normalize(f)
+    if float(np.linalg.norm(f)) < 1e-6:
+        f = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+    r = _normalize(np.cross(up_u, f))
+    return f, r, up_u
+
+
+def _plane_basis(forward_hint: np.ndarray, *, normal: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return (forward, right, normal_unit) for an arbitrary plane."""
+    n_u = _normalize(normal.astype(np.float32))
+    f = _project_to_plane(forward_hint.astype(np.float32), n_u)
+    f = _normalize(f)
+    if float(np.linalg.norm(f)) < 1e-6:
+        # Choose a stable fallback not parallel to the plane normal.
+        fallback = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+        if abs(float(np.dot(fallback, n_u))) > 0.9:
+            fallback = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+        f = _normalize(_project_to_plane(fallback, n_u))
+    r = _normalize(np.cross(n_u, f))
+    return f, r, n_u
+
+
+def _make_ground_aligned_slice(
+    origin: np.ndarray,
+    forward_hint: np.ndarray,
+    *,
+    up: np.ndarray,
+    ahead_m: float,
+    behind_m: float,
+    half_width_m: float,
+    step_m: float,
+) -> np.ndarray:
+    """Make a horizontal slice (ground-parallel) rotated to match a forward direction.
+
+    Plane is parallel to the ground (normal=up). Axes are (forward,right) on that plane.
+    """
+    f, r, _up_u = _ground_basis(forward_hint, up=up)
+
+    xs = np.arange(-behind_m, ahead_m, step_m, dtype=np.float32)
+    ys = np.arange(-half_width_m, half_width_m, step_m, dtype=np.float32)
+    if xs.size == 0 or ys.size == 0:
+        return np.zeros((0, 3), dtype=np.float32)
+    xg, yg = np.meshgrid(xs, ys, indexing="xy")
+
+    origin = origin.astype(np.float32)
+    pts = origin[None, None, :] + xg[..., None] * f[None, None, :] + yg[..., None] * r[None, None, :]
+    return pts.reshape(-1, 3).astype(np.float32)
+
+
+def _make_plane_slice(
+    origin: np.ndarray,
+    forward_hint: np.ndarray,
+    *,
+    normal: np.ndarray,
+    ahead_m: float,
+    behind_m: float,
+    half_width_m: float,
+    step_m: float,
+) -> np.ndarray:
+    """Make a planar slice (through origin) rotated to match a forward direction on that plane."""
+    f, r, _n_u = _plane_basis(forward_hint, normal=normal)
+    xs = np.arange(-behind_m, ahead_m, step_m, dtype=np.float32)
+    ys = np.arange(-half_width_m, half_width_m, step_m, dtype=np.float32)
+    if xs.size == 0 or ys.size == 0:
+        return np.zeros((0, 3), dtype=np.float32)
+    xg, yg = np.meshgrid(xs, ys, indexing="xy")
+    origin = origin.astype(np.float32)
+    pts = origin[None, None, :] + xg[..., None] * f[None, None, :] + yg[..., None] * r[None, None, :]
+    return pts.reshape(-1, 3).astype(np.float32)
 
 
 def _read_camera_trajectory_csv(path: Path) -> Dict[float, Tuple[np.ndarray, np.ndarray]]:
@@ -296,11 +467,18 @@ def main() -> int:
     parser.add_argument("--out_dir", type=Path, default=Path("outputs_nvblox"))
     parser.add_argument("--invert_pose", action="store_true", help="Invert poses before integration (if your trajectory is T_C_W)")
     parser.add_argument("--ui", action="store_true", help="Show live mesh viewer (requires open3d)")
+    parser.add_argument("--mode", choices=["mesh", "esdf"], default="mesh", help="What to visualize in the UI")
     parser.add_argument(
         "--color_mode",
         choices=["mesh", "solid"],
         default="mesh",
         help="Mesh coloring in UI: 'mesh' uses fused vertex colors; 'solid' uses a fixed shaded color",
+    )
+    parser.add_argument(
+        "--field_step_m",
+        type=float,
+        default=0.0,
+        help="ESDF/TSDF slice sampling step in meters (0 => use 2*voxel_size_m). Smaller => higher resolution, slower.",
     )
 
     args = parser.parse_args()
@@ -327,6 +505,8 @@ def main() -> int:
     try:
         from nvblox_torch.mapper import Mapper  # type: ignore
         from nvblox_torch.mapper_params import MapperParams, ProjectiveIntegratorParams  # type: ignore
+        from nvblox_torch.mapper import QueryType  # type: ignore
+        from nvblox_torch.constants import constants  # type: ignore
     except Exception as exc:  # pragma: no cover
         raise ImportError(
             "Failed to import nvblox_torch Mapper APIs. "
@@ -352,6 +532,15 @@ def main() -> int:
         viewer.show()
     prev_pose: np.ndarray | None = None
     path_points: list[np.ndarray] = []
+    recent_points: list[np.ndarray] = []
+    last_plane_normal = np.array([0.0, 0.0, 1.0], dtype=np.float32)
+    last_forward_on_plane = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+
+    if args.mode == "esdf":
+        if not hasattr(mapper, "query_differentiable_layer"):
+            raise RuntimeError("This nvblox_torch build does not expose query_differentiable_layer; cannot visualize ESDF.")
+        if not hasattr(mapper, "update_esdf"):
+            raise RuntimeError("This nvblox_torch build does not expose update_esdf; cannot visualize ESDF.")
     # Use median frame spacing as tolerance for nearest pose lookup.
     if len(ts_sorted) > 1:
         tol = float(np.median(np.diff(ts_sorted)) * 0.51)
@@ -405,6 +594,32 @@ def main() -> int:
             continue
         prev_pose = pose
         path_points.append(pose[:3, 3].copy())
+        recent_points.append(pose[:3, 3].copy())
+        if len(recent_points) > 200:
+            recent_points.pop(0)
+
+        # Estimate a best-fit plane normal from recent trajectory points (PCA).
+        world_up = np.array([0.0, 0.0, 1.0], dtype=np.float32)
+        if len(recent_points) >= 3:
+            pts = np.vstack(recent_points).astype(np.float32)
+            center = pts.mean(axis=0)
+            X = pts - center[None, :]
+            cov = (X.T @ X) / max(1, X.shape[0] - 1)
+            evals, evecs = np.linalg.eigh(cov)
+            normal = evecs[:, 0].astype(np.float32)  # smallest eigenvalue
+            if float(np.dot(normal, world_up)) < 0:
+                normal = -normal
+            if float(np.linalg.norm(normal)) < 1e-6:
+                normal = world_up
+            last_plane_normal = _normalize(normal).astype(np.float32)
+        else:
+            last_plane_normal = world_up
+
+        # Egocentric forward: camera +Z projected onto the estimated plane.
+        cam_forward_w = pose[:3, :3] @ np.array([0.0, 0.0, 1.0], dtype=np.float32)
+        fwd = _normalize(_project_to_plane(cam_forward_w, _normalize(last_plane_normal)))
+        if float(np.linalg.norm(fwd)) > 1e-6:
+            last_forward_on_plane = fwd.astype(np.float32)
 
         # Mapper expects depth/color on GPU, intrinsics and pose on CPU.
         depth_t = torch.from_numpy(depth_m).to(device=device, dtype=torch.float32)
@@ -424,19 +639,63 @@ def main() -> int:
 
         if args.mesh_every > 0 and (idx % int(args.mesh_every) == 0):
             t0 = time.perf_counter()
-            mapper.update_color_mesh()
-            mesh = mapper.get_color_mesh().to_open3d()
-            if viewer:
-                verts = np.asarray(mesh.vertices, dtype=np.float32)
-                faces = np.asarray(mesh.triangles, dtype=np.int32)
-                vcolors = None
-                if mesh.has_vertex_colors():
-                    vcolors = np.asarray(mesh.vertex_colors, dtype=np.float32)
-                    if vcolors.max() > 1.0:
-                        vcolors = vcolors / 255.0
-                viewer.update_mesh(verts, faces, vcolors, use_vertex_colors=args.color_mode == "mesh")
+            if args.mode == "mesh":
+                mapper.update_color_mesh()
+                mesh = mapper.get_color_mesh().to_open3d()
+                if viewer:
+                    verts = np.asarray(mesh.vertices, dtype=np.float32)
+                    faces = np.asarray(mesh.triangles, dtype=np.int32)
+                    vcolors = None
+                    if mesh.has_vertex_colors():
+                        vcolors = np.asarray(mesh.vertex_colors, dtype=np.float32)
+                        if vcolors.max() > 1.0:
+                            vcolors = vcolors / 255.0
+                    viewer.update_mesh(verts, faces, vcolors, use_vertex_colors=args.color_mode == "mesh")
+            else:
+                mapper.update_esdf()
+                qtype = QueryType.ESDF
+
+                # Egocentric navigation-style slice aligned to camera heading on the ground plane.
+                forward_hint = last_forward_on_plane
+                step = float(args.field_step_m) if float(args.field_step_m) > 0 else float(args.voxel_size_m) * 2.0
+                origin = pose[:3, 3].copy()
+                ahead_m = 8.0
+                behind_m = 2.0
+                half_width_m = 4.0
+                query_xyz = _make_plane_slice(
+                    origin,
+                    forward_hint,
+                    normal=last_plane_normal,
+                    ahead_m=ahead_m,
+                    behind_m=behind_m,
+                    half_width_m=half_width_m,
+                    step_m=step,
+                )
+                if viewer:
+                    viewer.update_slice_plane(
+                        origin,
+                        forward_hint,
+                        normal=last_plane_normal,
+                        ahead_m=ahead_m,
+                        behind_m=behind_m,
+                        half_width_m=half_width_m,
+                    )
+                if query_xyz.shape[0] > 0:
+                    query_t = torch.from_numpy(query_xyz).to(device=device, dtype=torch.float32)
+                    sdf = mapper.query_differentiable_layer(qtype, query_t).detach()
+                    sdf_np = sdf.float().reshape(-1).cpu().numpy()
+
+                    unknown = float(constants.esdf_unknown_distance())
+                    valid = sdf_np != unknown
+                    sdf_vis = np.clip(sdf_np[valid], 0.0, 1.0)
+                    colors_rgb = _colormap_plasma01((sdf_vis - 0.0) / (1.0 - 0.0))
+                    xyz_vis = query_xyz[valid]
+
+                    rgba = np.concatenate([colors_rgb, np.ones((colors_rgb.shape[0], 1), dtype=np.float32)], axis=1)
+                    if viewer:
+                        viewer.update_field_points(xyz_vis.astype(np.float32), rgba.astype(np.float32))
             dt_mesh = (time.perf_counter() - t0) * 1000.0
-            print(f"Integrated frame {idx} (t={ts:.6f}) - integ {dt_int_ms:.1f} ms, mesh {dt_mesh:.1f} ms")
+            print(f"Integrated frame {idx} (t={ts:.6f}) - integ {dt_int_ms:.1f} ms, vis {dt_mesh:.1f} ms")
         else:
             if viewer:
                 viewer.process_events()
@@ -445,7 +704,7 @@ def main() -> int:
     # Final mesh update and export if available.
     mapper.update_color_mesh()
     final_mesh = mapper.get_color_mesh().to_open3d()
-    if viewer:
+    if viewer and args.mode == "mesh":
         verts = np.asarray(final_mesh.vertices, dtype=np.float32)
         faces = np.asarray(final_mesh.triangles, dtype=np.int32)
         vcolors = None

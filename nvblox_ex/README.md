@@ -72,4 +72,6 @@ python3 nvblox_ex/run_nvblox_phone_sample3.py \
 - `--mesh_every`: Update mesh every N frames (affects UI refresh cadence).
 - `--invert_pose`: Invert each pose before integration (use if your trajectory is `T_C_W` instead of `T_W_C`).
 - `--ui`: Show live Qt mesh viewer while integrating.
+- `--mode`: UI visualization mode: `mesh` or `esdf` (ESDF requires nvblox_torch query APIs).
 - `--color_mode`: UI mesh coloring, `mesh` (fused vertex colors) or `solid` (fixed shaded color).
+- `--field_step_m`: ESDF/TSDF slice sampling step (smaller = higher resolution, slower).
