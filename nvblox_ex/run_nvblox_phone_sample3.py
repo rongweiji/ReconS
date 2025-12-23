@@ -11,6 +11,9 @@ Outputs:
 
 Note: The nvblox_torch Python API evolves; this runner targets the documented
 Mapper interface (add_depth_frame/add_color_frame/update_color_mesh).
+
+UI note (WSL): The `--ui` option uses a Qt window (PySide6 + pyqtgraph + OpenGL).
+On WSL this typically requires WSLg (Windows 11) or an X server.
 """
 
 from __future__ import annotations
@@ -44,12 +47,12 @@ def _read_intrinsics_json(path: Path, *, width: int, height: int) -> np.ndarray:
 
 
 class QtMeshViewer:
-    """Qt/pyqtgraph mesh viewer that avoids GLFW/GLEW issues on WSLg."""
+    """Qt/pyqtgraph viewer with three panes: RGB, depth, and 3D."""
 
     def __init__(self, title: str = "nvblox mesh"):
         # Lazy imports so headless mode stays lightweight
         try:
-            from PySide6 import QtGui, QtWidgets  # type: ignore
+            from PySide6 import QtCore, QtGui, QtWidgets  # type: ignore
             import pyqtgraph.opengl as gl  # type: ignore
         except ModuleNotFoundError as exc:
             raise ImportError(
@@ -57,9 +60,61 @@ class QtMeshViewer:
                 "python -m pip install PySide6 pyqtgraph PyOpenGL"
             ) from exc
 
+        self.QtCore = QtCore
         self.QtWidgets = QtWidgets
+        self.QtGui = QtGui
         self.gl = gl
         self.app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+
+        def img_to_qpixmap(img: np.ndarray) -> QtGui.QPixmap:
+            """Convert a numpy image (H,W,3 RGB) or (H,W) grayscale to QPixmap."""
+            img = np.ascontiguousarray(img)
+            if img.ndim == 2:
+                h, w = img.shape
+                qimg = QtGui.QImage(img.data, w, h, w, QtGui.QImage.Format_Grayscale8)
+            else:
+                h, w, ch = img.shape
+                if ch != 3:
+                    raise ValueError(f"Expected 3-channel RGB image, got shape {img.shape}")
+                qimg = QtGui.QImage(img.data, w, h, 3 * w, QtGui.QImage.Format_RGB888)
+            return QtGui.QPixmap.fromImage(qimg.copy())
+
+        class ImageView(QtWidgets.QLabel):
+            def __init__(self, title: str):
+                super().__init__()
+                self._title = title
+                self._pix: QtGui.QPixmap | None = None
+                self.setAlignment(QtCore.Qt.AlignCenter)
+                self.setFrameStyle(QtWidgets.QFrame.Panel | QtWidgets.QFrame.Sunken)
+                self.setMinimumSize(320, 240)
+                self.setText(title)
+
+            def set_image(self, img: np.ndarray | None):
+                if img is None:
+                    self._pix = None
+                    self.setText(self._title)
+                    self.setPixmap(QtGui.QPixmap())
+                else:
+                    self._pix = img_to_qpixmap(img)
+                    self._update_scaled()
+
+            def resizeEvent(self, event):
+                super().resizeEvent(event)
+                self._update_scaled()
+
+            def _update_scaled(self):
+                if self._pix is None:
+                    return
+                self.setPixmap(
+                    self._pix.scaled(
+                        self.size(),
+                        QtCore.Qt.KeepAspectRatio,
+                        QtCore.Qt.FastTransformation,
+                    )
+                )
+
+        self._img_to_qpixmap = img_to_qpixmap
+        self._ImageView = ImageView
 
         self.view = gl.GLViewWidget()
         self.view.setCameraPosition(distance=3)
@@ -69,18 +124,121 @@ class QtMeshViewer:
         grid.setSpacing(0.5, 0.5)
         self.view.addItem(grid)
 
+        # Image panes
+        self.rgb_view = ImageView("RGB")
+        self.depth_view = ImageView("Depth")
+
         self.mesh_item = None
         self.pose_items: list = []
         self.path_item = None
         self.field_item = None
         self.slice_plane_item = None
         self.light_pos: np.ndarray | None = None  # point light in world coords
+        def make_small_title(text: str) -> QtWidgets.QLabel:
+            lbl = QtWidgets.QLabel(text)
+            lbl.setAlignment(QtCore.Qt.AlignCenter)
+            # Point-size based scaling can look huge under Qt/WSL DPI settings.
+            # Use a small pixel size and cap the label height to keep titles compact.
+            f = lbl.font()
+            f.setPixelSize(11)
+            lbl.setFont(f)
+            lbl.setMaximumHeight(16)
+            lbl.setContentsMargins(0, 0, 0, 0)
+            return lbl
+
         self.window = QtWidgets.QWidget()
-        layout = QtWidgets.QVBoxLayout()
-        layout.addWidget(self.view)
-        self.window.setLayout(layout)
+        main_layout = QtWidgets.QVBoxLayout()
+        main_layout.setContentsMargins(6, 6, 6, 6)
+        main_layout.setSpacing(6)
+
+        # Row 1: RGB + Depth (short row)
+        top_row = QtWidgets.QWidget()
+        top_layout = QtWidgets.QHBoxLayout()
+        top_layout.setContentsMargins(0, 0, 0, 0)
+        top_layout.setSpacing(6)
+
+        rgb_col = QtWidgets.QVBoxLayout()
+        rgb_col.setContentsMargins(0, 0, 0, 0)
+        rgb_col.setSpacing(2)
+        rgb_col.addWidget(make_small_title("RGB"))
+        rgb_col.addWidget(self.rgb_view)
+        rgb_widget = QtWidgets.QWidget()
+        rgb_widget.setLayout(rgb_col)
+
+        depth_col = QtWidgets.QVBoxLayout()
+        depth_col.setContentsMargins(0, 0, 0, 0)
+        depth_col.setSpacing(2)
+        depth_col.addWidget(make_small_title("Depth"))
+        depth_col.addWidget(self.depth_view)
+        depth_widget = QtWidgets.QWidget()
+        depth_widget.setLayout(depth_col)
+
+        top_layout.addWidget(rgb_widget)
+        top_layout.addWidget(depth_widget)
+        top_row.setLayout(top_layout)
+
+        # Row 2: 3D view (takes remaining space)
+        view_col = QtWidgets.QVBoxLayout()
+        view_col.setContentsMargins(0, 0, 0, 0)
+        view_col.setSpacing(2)
+        view_col.addWidget(make_small_title("3D"))
+        view_col.addWidget(self.view)
+        view_widget = QtWidgets.QWidget()
+        view_widget.setLayout(view_col)
+
+        main_layout.addWidget(top_row)
+        main_layout.addWidget(view_widget)
+        # Keep the top row at ~25% of the window height.
+        main_layout.setStretch(0, 1)
+        main_layout.setStretch(1, 3)
+
+        self.window.setLayout(main_layout)
+
+        # Enforce top row height ~= 1/4 window height even when resizing.
+        class _ResizeFilter(QtCore.QObject):
+            def __init__(self, host: QtWidgets.QWidget, top: QtWidgets.QWidget):
+                super().__init__(host)
+                self._top = top
+
+            def eventFilter(self, obj, event):
+                if event.type() == QtCore.QEvent.Resize:
+                    h = int(event.size().height())
+                    top_h = max(120, int(h * 0.25))
+                    self._top.setFixedHeight(top_h)
+                return False
+
+        self._resize_filter = _ResizeFilter(self.window, top_row)
+        self.window.installEventFilter(self._resize_filter)
         self.window.setWindowTitle(title)
-        self.window.resize(1200, 900)
+        self.window.resize(1600, 900)
+
+    def update_rgb_frame(self, rgb_uint8: np.ndarray):
+        """Update the RGB pane. Expects RGB uint8 image (H,W,3)."""
+        if rgb_uint8 is None:
+            return
+        if rgb_uint8.ndim != 3 or rgb_uint8.shape[2] != 3:
+            raise ValueError(f"RGB frame must be (H,W,3), got {rgb_uint8.shape}")
+        if rgb_uint8.dtype != np.uint8:
+            rgb_uint8 = rgb_uint8.astype(np.uint8)
+        self.rgb_view.set_image(rgb_uint8)
+        self.process_events()
+
+    def update_depth_frame(self, depth_m: np.ndarray, *, max_depth_m: float = 5.0):
+        """Update the depth pane from metric depth (H,W) float32 in meters."""
+        if depth_m is None:
+            return
+        if depth_m.ndim != 2:
+            raise ValueError(f"Depth frame must be (H,W), got {depth_m.shape}")
+        dm = depth_m.astype(np.float32)
+        # Normalize: 0 => invalid; clip to max depth for visualization.
+        valid = dm > 0
+        dm_vis = np.zeros_like(dm, dtype=np.float32)
+        dm_vis[valid] = np.clip(dm[valid], 0.0, float(max_depth_m)) / max(float(max_depth_m), 1e-6)
+        norm_uint8 = (dm_vis * 255.0).astype(np.uint8)
+        colored_bgr = cv2.applyColorMap(norm_uint8, cv2.COLORMAP_PLASMA)
+        colored_rgb = cv2.cvtColor(colored_bgr, cv2.COLOR_BGR2RGB)
+        self.depth_view.set_image(colored_rgb)
+        self.process_events()
 
     def show(self):
         self.window.show()
@@ -476,7 +634,7 @@ def main() -> int:
     parser.add_argument("--mesh_every", type=int, default=50, help="Update mesh every N frames")
     parser.add_argument("--out_dir", type=Path, default=Path("outputs_nvblox"))
     parser.add_argument("--invert_pose", action="store_true", help="Invert poses before integration (if your trajectory is T_C_W)")
-    parser.add_argument("--ui", action="store_true", help="Show live mesh viewer (requires open3d)")
+    parser.add_argument("--ui", action="store_true", help="Show live UI (RGB + depth frames + 3D view)")
     parser.add_argument("--mode", choices=["mesh", "esdf", "voxel"], default="mesh", help="What to visualize in the UI")
     parser.add_argument(
         "--color_mode",
@@ -609,6 +767,10 @@ def main() -> int:
 
         # nvblox_torch color expects RGB uint8 with 3 channels on GPU.
         rgb_uint8 = cv2.cvtColor(rgb, cv2.COLOR_BGR2RGB)
+
+        if viewer:
+            viewer.update_rgb_frame(rgb_uint8)
+            viewer.update_depth_frame(depth_m, max_depth_m=float(args.max_integration_distance_m))
 
         pose = _make_pose_matrix(t, q)
         if args.invert_pose:
