@@ -72,10 +72,12 @@ python3 nvblox_ex/run_nvblox_phone_sample3.py \
 - `--mesh_every`: Update mesh every N frames (affects UI refresh cadence).
 - `--invert_pose`: Invert each pose before integration (use if your trajectory is `T_C_W` instead of `T_W_C`).
 - `--ui`: Show live Qt mesh viewer while integrating.
-- `--mode`: UI visualization mode: `mesh`, `esdf`, or `voxel` (ESDF/voxel require nvblox_torch layer/query APIs).
-- `--color_mode`: UI mesh coloring, `mesh` (fused vertex colors) or `solid` (fixed shaded color).
+- `--mode`: UI visualization mode: `colormesh`, `solidmesh`, `esdf`, `tsdf`, or `pointcloud` (ESDF/TSDF require nvblox_torch layer/query APIs).
+- `--pointcloud_stride`: Pointcloud mode pixel stride (larger = fewer points).
+- `--pointcloud_max_points`: Max points sent to the UI per frame.
 - `--field_step_m`: ESDF slice sampling step (smaller = higher resolution, slower).
 - `--voxel_band_m`: Voxel mode TSDF band (|tsdf| < band).
 - `--voxel_radius_m`: Voxel mode local radius around current pose.
 - `--voxel_max_points`: Voxel mode downsample cap for UI speed.
+- `--cube`: TSDF mode render voxels as cubes instead of points (slower).
 This script always exports `tsdf_voxel_grid.ply` and `occupancy_voxel_grid.ply` into `--out_dir`.

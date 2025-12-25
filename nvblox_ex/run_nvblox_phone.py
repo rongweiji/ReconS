@@ -47,6 +47,8 @@ def _write_voxel_ply(path: Path, xyz: np.ndarray, intensity: np.ndarray) -> None
             f.write(f"{x:.6f} {y:.6f} {z:.6f} {float(val):.6f}\n")
 
 
+
+
 def _export_tsdf_voxel_ply(mapper, out_path: Path, band_m: float, as_occupancy: bool) -> bool:
     if not hasattr(mapper, "tsdf_layer_view"):
         print("Skipping voxel PLY export: Mapper has no tsdf_layer_view.")
@@ -341,6 +343,12 @@ class QtMeshViewer:
         # Remove existing mesh item if present
         if self.mesh_item is not None:
             self.view.removeItem(self.mesh_item)
+        if self.field_item is not None:
+            self.view.removeItem(self.field_item)
+            self.field_item = None
+        if self.slice_plane_item is not None:
+            self.view.removeItem(self.slice_plane_item)
+            self.slice_plane_item = None
         # Compute simple Lambertian shading for better shape perception.
         normals = self._compute_vertex_normals(verts, faces)
         if self.light_pos is not None:
@@ -377,7 +385,7 @@ class QtMeshViewer:
         self.process_events()
 
     def update_field_points(self, xyz: np.ndarray, rgba: np.ndarray):
-        """Display a colored point cloud (for ESDF/TSDF slices)."""
+        """Display a colored point cloud (for ESDF/TSDF/occupancy/pointcloud)."""
         if self.mesh_item is not None:
             self.view.removeItem(self.mesh_item)
             self.mesh_item = None
@@ -572,6 +580,102 @@ def _downsample_points(xyz: np.ndarray, rgba: np.ndarray, max_points: int) -> tu
     return xyz[idx], rgba[idx]
 
 
+def _build_cube_mesh(centers: np.ndarray, voxel_size: float, colors: np.ndarray | None):
+    if centers.size == 0:
+        return np.empty((0, 3), dtype=np.float32), np.empty((0, 3), dtype=np.int32), None
+
+    centers = centers.astype(np.float32)
+    if centers.ndim != 2 or centers.shape[1] != 3:
+        centers = centers.reshape(-1, 3)
+
+    hs = float(voxel_size) * 0.5
+    offsets = np.array(
+        [
+            [-hs, -hs, -hs],
+            [hs, -hs, -hs],
+            [hs, hs, -hs],
+            [-hs, hs, -hs],
+            [-hs, -hs, hs],
+            [hs, -hs, hs],
+            [hs, hs, hs],
+            [-hs, hs, hs],
+        ],
+        dtype=np.float32,
+    )
+    base_faces = np.array(
+        [
+            [0, 1, 2],
+            [0, 2, 3],
+            [4, 5, 6],
+            [4, 6, 7],
+            [0, 1, 5],
+            [0, 5, 4],
+            [1, 2, 6],
+            [1, 6, 5],
+            [2, 3, 7],
+            [2, 7, 6],
+            [3, 0, 4],
+            [3, 4, 7],
+        ],
+        dtype=np.int32,
+    )
+
+    n = centers.shape[0]
+    verts = centers[:, None, :] + offsets[None, :, :]
+    verts = verts.reshape(-1, 3)
+
+    faces = np.tile(base_faces, (n, 1))
+    face_offsets = (np.arange(n, dtype=np.int32) * 8).repeat(12).reshape(-1, 1)
+    faces = faces + face_offsets
+
+    vcolors = None
+    if colors is not None:
+        if colors.shape[1] == 3:
+            colors = np.concatenate([colors, np.ones((colors.shape[0], 1), dtype=np.float32)], axis=1)
+        vcolors = np.repeat(colors.astype(np.float32), 8, axis=0)
+    return verts.astype(np.float32), faces.astype(np.int32), vcolors
+
+
+def _depth_to_pointcloud(
+    depth_m: np.ndarray,
+    intrinsics: np.ndarray,
+    rgb_uint8: np.ndarray,
+    *,
+    stride: int,
+    max_depth_m: float | None,
+    pose_w_c: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    h, w = depth_m.shape
+    ys = np.arange(0, h, stride, dtype=np.int32)
+    xs = np.arange(0, w, stride, dtype=np.int32)
+    xv, yv = np.meshgrid(xs, ys)
+    z = depth_m[yv, xv].astype(np.float32)
+    valid = z > 0
+    if max_depth_m is not None:
+        valid &= z <= float(max_depth_m)
+    if not np.any(valid):
+        return np.empty((0, 3), dtype=np.float32), np.empty((0, 4), dtype=np.float32)
+
+    fx = float(intrinsics[0, 0])
+    fy = float(intrinsics[1, 1])
+    cx = float(intrinsics[0, 2])
+    cy = float(intrinsics[1, 2])
+
+    x = (xv[valid].astype(np.float32) - cx) * z[valid] / fx
+    y = (yv[valid].astype(np.float32) - cy) * z[valid] / fy
+    xyz_cam = np.stack([x, y, z[valid]], axis=1)
+
+    rot = pose_w_c[:3, :3].astype(np.float32)
+    trans = pose_w_c[:3, 3].astype(np.float32)
+    xyz = (rot @ xyz_cam.T).T + trans[None, :]
+
+    rgb = rgb_uint8[yv[valid], xv[valid]].astype(np.float32) / 255.0
+    rgba = np.concatenate([rgb, np.ones((rgb.shape[0], 1), dtype=np.float32)], axis=1)
+    return xyz.astype(np.float32), rgba.astype(np.float32)
+
+
+
+
 def _make_plane_slice(
     origin: np.ndarray,
     forward_hint: np.ndarray,
@@ -708,12 +812,11 @@ def main() -> int:
     parser.add_argument("--out_dir", type=Path, default=Path("outputs_nvblox"))
     parser.add_argument("--invert_pose", action="store_true", help="Invert poses before integration (if your trajectory is T_C_W)")
     parser.add_argument("--ui", action="store_true", help="Show live UI (RGB + depth frames + 3D view)")
-    parser.add_argument("--mode", choices=["mesh", "esdf", "voxel"], default="mesh", help="What to visualize in the UI")
     parser.add_argument(
-        "--color_mode",
-        choices=["mesh", "solid"],
-        default="mesh",
-        help="Mesh coloring in UI: 'mesh' uses fused vertex colors; 'solid' uses a fixed shaded color",
+        "--mode",
+        choices=["colormesh", "solidmesh", "esdf", "tsdf", "pointcloud"],
+        default="colormesh",
+        help="What to visualize in the UI",
     )
     parser.add_argument(
         "--field_step_m",
@@ -738,6 +841,23 @@ def main() -> int:
         type=int,
         default=50000,
         help="Voxel mode: downsample to at most this many points for UI performance.",
+    )
+    parser.add_argument(
+        "--cube",
+        action="store_true",
+        help="TSDF mode: render voxels as cubes instead of points (slower).",
+    )
+    parser.add_argument(
+        "--pointcloud_stride",
+        type=int,
+        default=4,
+        help="Pointcloud mode: pixel stride for depth projection (larger = fewer points).",
+    )
+    parser.add_argument(
+        "--pointcloud_max_points",
+        type=int,
+        default=60000,
+        help="Pointcloud mode: max points sent to the UI per frame.",
     )
 
     args = parser.parse_args()
@@ -800,7 +920,7 @@ def main() -> int:
             raise RuntimeError("This nvblox_torch build does not expose query_differentiable_layer; cannot visualize ESDF.")
         if not hasattr(mapper, "update_esdf"):
             raise RuntimeError("This nvblox_torch build does not expose update_esdf; cannot visualize ESDF.")
-    if args.mode == "voxel":
+    if args.mode == "tsdf":
         if not hasattr(mapper, "tsdf_layer_view"):
             raise RuntimeError("This nvblox_torch build does not expose tsdf_layer_view; cannot visualize voxels.")
     # Use median frame spacing as tolerance for nearest pose lookup.
@@ -902,10 +1022,22 @@ def main() -> int:
             viewer.update_pose_axes(pose)
             if path_points:
                 viewer.update_path(np.vstack(path_points))
+            if args.mode == "pointcloud":
+                xyz, rgba = _depth_to_pointcloud(
+                    depth_m,
+                    intrinsics,
+                    rgb_uint8,
+                    stride=int(args.pointcloud_stride),
+                    max_depth_m=float(args.max_integration_distance_m),
+                    pose_w_c=pose,
+                )
+                if xyz.shape[0] > 0:
+                    xyz, rgba = _downsample_points(xyz, rgba, int(args.pointcloud_max_points))
+                viewer.update_field_points(xyz, rgba)
 
         if args.mesh_every > 0 and (idx % int(args.mesh_every) == 0):
             t0 = time.perf_counter()
-            if args.mode == "mesh":
+            if args.mode in ("colormesh", "solidmesh"):
                 mapper.update_color_mesh()
                 mesh = mapper.get_color_mesh().to_open3d()
                 if viewer:
@@ -916,7 +1048,8 @@ def main() -> int:
                         vcolors = np.asarray(mesh.vertex_colors, dtype=np.float32)
                         if vcolors.max() > 1.0:
                             vcolors = vcolors / 255.0
-                    viewer.update_mesh(verts, faces, vcolors, use_vertex_colors=args.color_mode == "mesh")
+                    use_vcols = args.mode == "colormesh"
+                    viewer.update_mesh(verts, faces, vcolors, use_vertex_colors=use_vcols)
             elif args.mode == "esdf":
                 mapper.update_esdf()
                 qtype = QueryType.ESDF
@@ -963,7 +1096,7 @@ def main() -> int:
                             xyz_vis.astype(np.float32), rgba.astype(np.float32), int(args.voxel_max_points)
                         )
                         viewer.update_field_points(xyz_vis.astype(np.float32), rgba.astype(np.float32))
-            elif args.mode == "voxel":
+            elif args.mode == "tsdf":
                 # Voxel mode: visualize a local band of TSDF voxels near the surface.
                 tsdf_layer = mapper.tsdf_layer_view()
                 if not hasattr(tsdf_layer, "get_all_blocks"):
@@ -1048,7 +1181,12 @@ def main() -> int:
                     xyz = xyz_t.detach().cpu().numpy().astype(np.float32)
                     rgba = rgba_t.detach().cpu().numpy().astype(np.float32)
                     xyz, rgba = _downsample_points(xyz, rgba, int(args.voxel_max_points))
-                    viewer.update_field_points(xyz, rgba)
+                    if args.cube:
+                        voxel_size = float(tsdf_layer.voxel_size())
+                        verts, faces, vcolors = _build_cube_mesh(xyz, voxel_size, rgba)
+                        viewer.update_mesh(verts, faces, vcolors, use_vertex_colors=True)
+                    else:
+                        viewer.update_field_points(xyz, rgba)
             dt_mesh = (time.perf_counter() - t0) * 1000.0
             print(f"Integrated frame {idx} (t={ts:.6f}) - integ {dt_int_ms:.1f} ms, vis {dt_mesh:.1f} ms")
         else:
@@ -1059,7 +1197,7 @@ def main() -> int:
     # Final mesh update and export if available.
     mapper.update_color_mesh()
     final_mesh = mapper.get_color_mesh().to_open3d()
-    if viewer and args.mode == "mesh":
+    if viewer and args.mode in ("colormesh", "solidmesh"):
         verts = np.asarray(final_mesh.vertices, dtype=np.float32)
         faces = np.asarray(final_mesh.triangles, dtype=np.int32)
         vcolors = None
@@ -1067,7 +1205,8 @@ def main() -> int:
             vcolors = np.asarray(final_mesh.vertex_colors, dtype=np.float32)
             if vcolors.max() > 1.0:
                 vcolors = vcolors / 255.0
-        viewer.update_mesh(verts, faces, vcolors, use_vertex_colors=args.color_mode == "mesh")
+        use_vcols = args.mode == "colormesh"
+        viewer.update_mesh(verts, faces, vcolors, use_vertex_colors=use_vcols)
         viewer.update_pose_axes(np.eye(4, dtype=np.float32))
         if path_points:
             viewer.update_path(np.vstack(path_points))

@@ -47,6 +47,64 @@ def _esdf_colors(values: "np.ndarray") -> "np.ndarray":
     return np.concatenate([colors, alpha], axis=1).astype(np.float32)
 
 
+def _build_cube_mesh(centers: "np.ndarray", voxel_size: float, colors: "np.ndarray | None"):
+    if centers.size == 0:
+        return np.empty((0, 3), dtype=np.float32), np.empty((0, 3), dtype=np.int32), None
+
+    centers = centers.astype(np.float32)
+    if centers.ndim != 2 or centers.shape[1] != 3:
+        centers = centers.reshape(-1, 3)
+
+    hs = float(voxel_size) * 0.5
+    offsets = np.array(
+        [
+            [-hs, -hs, -hs],
+            [hs, -hs, -hs],
+            [hs, hs, -hs],
+            [-hs, hs, -hs],
+            [-hs, -hs, hs],
+            [hs, -hs, hs],
+            [hs, hs, hs],
+            [-hs, hs, hs],
+        ],
+        dtype=np.float32,
+    )
+    base_faces = np.array(
+        [
+            [0, 1, 2],
+            [0, 2, 3],
+            [4, 5, 6],
+            [4, 6, 7],
+            [0, 1, 5],
+            [0, 5, 4],
+            [1, 2, 6],
+            [1, 6, 5],
+            [2, 3, 7],
+            [2, 7, 6],
+            [3, 0, 4],
+            [3, 4, 7],
+        ],
+        dtype=np.int32,
+    )
+
+    n = centers.shape[0]
+    verts = centers[:, None, :] + offsets[None, :, :]
+    verts = verts.reshape(-1, 3)
+
+    faces = np.tile(base_faces, (n, 1))
+    face_offsets = (np.arange(n, dtype=np.int32) * 8).repeat(12).reshape(-1, 1)
+    faces = faces + face_offsets
+
+    vcolors = None
+    if colors is not None:
+        if colors.shape[1] == 3:
+            colors = np.concatenate(
+                [colors, np.ones((colors.shape[0], 1), dtype=np.float32)], axis=1
+            )
+        vcolors = np.repeat(colors.astype(np.float32), 8, axis=0)
+    return verts.astype(np.float32), faces.astype(np.int32), vcolors
+
+
 class QtViewer(QtWidgets.QWidget):
     def __init__(self, title: str):
         super().__init__()
@@ -139,6 +197,11 @@ def main() -> int:
             "pointcloud."
         ),
     )
+    parser.add_argument(
+        "--cube",
+        action="store_true",
+        help="Render voxel grids as cubes instead of points (slower for large grids).",
+    )
     args = parser.parse_args()
 
     file_extension = args.file_path.suffix.lstrip(".").lower()
@@ -165,7 +228,11 @@ def main() -> int:
             colors = _esdf_colors(values[mask].astype(np.float32))
             title = "ESDF Voxel Grid"
         win = QtViewer(title)
-        win.add_scatter(points.astype("float32"), colors.astype("float32"))
+        if args.cube:
+            verts, faces, vcolors = _build_cube_mesh(points, voxel_grid.get_voxel_size(), colors)
+            win.add_mesh(verts, faces, vcolors)
+        else:
+            win.add_scatter(points.astype("float32"), colors.astype("float32"))
     elif file_extension == "ply":
         kind = _detect_ply_kind(args.file_path)
         if kind == "voxel":
@@ -192,7 +259,11 @@ def main() -> int:
                 colors = _esdf_colors(values[mask].astype(np.float32))
                 title = "ESDF Voxel Grid"
             win = QtViewer(title)
-            win.add_scatter(points.astype("float32"), colors.astype("float32"))
+            if args.cube:
+                verts, faces, vcolors = _build_cube_mesh(points, voxel_grid.get_voxel_size(), colors)
+                win.add_mesh(verts, faces, vcolors)
+            else:
+                win.add_scatter(points.astype("float32"), colors.astype("float32"))
         else:
             print("Loading ply file as mesh:", args.file_path)
             verts, faces, vcolors = _load_mesh(args.file_path)
