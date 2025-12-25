@@ -31,6 +31,79 @@ import sys
 import time
 
 
+def _write_voxel_ply(path: Path, xyz: np.ndarray, intensity: np.ndarray) -> None:
+    if xyz.shape[0] != intensity.shape[0]:
+        raise ValueError("xyz/intensity length mismatch.")
+    with path.open("w", encoding="utf-8") as f:
+        f.write("ply\n")
+        f.write("format ascii 1.0\n")
+        f.write(f"element vertex {xyz.shape[0]}\n")
+        f.write("property float x\n")
+        f.write("property float y\n")
+        f.write("property float z\n")
+        f.write("property float intensity\n")
+        f.write("end_header\n")
+        for (x, y, z), val in zip(xyz, intensity):
+            f.write(f"{x:.6f} {y:.6f} {z:.6f} {float(val):.6f}\n")
+
+
+def _export_tsdf_voxel_ply(mapper, out_path: Path, band_m: float, as_occupancy: bool) -> bool:
+    if not hasattr(mapper, "tsdf_layer_view"):
+        print("Skipping voxel PLY export: Mapper has no tsdf_layer_view.")
+        return False
+    tsdf_layer = mapper.tsdf_layer_view()
+    if not hasattr(tsdf_layer, "get_all_blocks"):
+        print("Skipping voxel PLY export: TsdfLayer.get_all_blocks is unavailable.")
+        return False
+
+    blocks, indices = tsdf_layer.get_all_blocks()
+    block_dim = int(tsdf_layer.block_dim_in_voxels)
+    voxel_size = float(tsdf_layer.voxel_size())
+
+    if isinstance(indices, torch.Tensor):
+        idxs = indices.to(device="cuda", dtype=torch.int32)
+    elif isinstance(indices, (list, tuple)) and (len(indices) == 0 or isinstance(indices[0], torch.Tensor)):
+        idxs = torch.stack([i.to(device="cuda", dtype=torch.int32) for i in indices], dim=0) if len(indices) > 0 else torch.empty((0, 3), device="cuda", dtype=torch.int32)
+    else:
+        idxs = torch.tensor(indices, device="cuda", dtype=torch.int32)
+
+    blocks_iter = blocks if isinstance(blocks, (list, tuple)) else [b for b in blocks]
+
+    pts_accum: list[torch.Tensor] = []
+    val_accum: list[torch.Tensor] = []
+
+    for block, bidx in zip(blocks_iter, idxs):
+        block = block.to(device="cuda")
+        if block.shape[-1] < 2:
+            continue
+        tsdf = block[..., 0]
+        w = block[..., 1]
+        mask = w > 0
+        if band_m > 0:
+            mask &= torch.abs(tsdf) < band_m
+        if not torch.any(mask):
+            continue
+
+        coords = torch.nonzero(mask, as_tuple=False).to(torch.float32)
+        bidx_f = bidx.to(torch.float32)
+        gv = bidx_f[None, :] * block_dim + coords + 0.5
+        centers = gv * voxel_size
+        vals = tsdf[mask].reshape(-1)
+        if as_occupancy:
+            vals = (vals < 0).to(torch.float32)
+        pts_accum.append(centers)
+        val_accum.append(vals.to(torch.float32))
+
+    if not pts_accum:
+        print("Skipping voxel PLY export: no observed voxels.")
+        return False
+
+    xyz = torch.cat(pts_accum, dim=0).cpu().numpy().astype(np.float32)
+    vals = torch.cat(val_accum, dim=0).cpu().numpy().astype(np.float32)
+    _write_voxel_ply(out_path, xyz, vals)
+    return True
+
+
 def _read_intrinsics_json(path: Path, *, width: int, height: int) -> np.ndarray:
     data = json.loads(path.read_text())
     entries = data.get("intrinsics") or []
@@ -1022,6 +1095,26 @@ def main() -> int:
         print(f"Wrote mesh: {out_mesh}")
     else:
         print("Mesh export method not found on Mapper. You can still visualize or access mesh/layers via the nvblox_torch API.")
+
+    out_tsdf = args.out_dir / "tsdf_voxel_grid.ply"
+    did_export_tsdf = _export_tsdf_voxel_ply(
+        mapper,
+        out_tsdf,
+        band_m=float(args.voxel_band_m),
+        as_occupancy=False,
+    )
+    if did_export_tsdf:
+        print(f"Wrote voxel grid: {out_tsdf}")
+
+    out_occ = args.out_dir / "occupancy_voxel_grid.ply"
+    did_export_occ = _export_tsdf_voxel_ply(
+        mapper,
+        out_occ,
+        band_m=float(args.voxel_band_m),
+        as_occupancy=True,
+    )
+    if did_export_occ:
+        print(f"Wrote voxel grid: {out_occ}")
 
     if viewer:
         print("Live viewer running; close the window to exit.")

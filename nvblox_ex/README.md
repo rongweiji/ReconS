@@ -78,3 +78,4 @@ python3 nvblox_ex/run_nvblox_phone_sample3.py \
 - `--voxel_band_m`: Voxel mode TSDF band (|tsdf| < band).
 - `--voxel_radius_m`: Voxel mode local radius around current pose.
 - `--voxel_max_points`: Voxel mode downsample cap for UI speed.
+This script always exports `tsdf_voxel_grid.ply` and `occupancy_voxel_grid.ply` into `--out_dir`.
