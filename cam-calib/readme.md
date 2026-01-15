@@ -1,4 +1,4 @@
-Stereo Calibration (OpenCV, no ROS)
+Stereo + Mono Calibration (OpenCV, no ROS)
 
 Checkerboard
 - Inner corners: 8 rows x 6 cols (cross points). Use 6 8 if your board is rotated.
@@ -6,10 +6,12 @@ Checkerboard
 - Printed on letter paper; original 108 mm squares scaled to 25% → 27 mm.
 
 Prepare Data
-- Place synchronized image pairs in two folders (left/right) with matching filenames.
+- Stereo: synchronized image pairs in two folders (left/right) with matching filenames.
+- Mono: a single folder of images.
 - Example paths:
-	- `stereo-cam-calib/cali_data1/workspace_cali/front_stereo_cam_left`
-	- `stereo-cam-calib/cali_data1/workspace_cali/front_stereo_cam_right`
+	- `cam-calib/cali_data1/workspace_cali/front_stereo_cam_left`
+	- `cam-calib/cali_data1/workspace_cali/front_stereo_cam_right`
+	- `cam-calib/cali_data1/workspace_cali/front_stereo_cam_left`
 
 Dependencies
 - Python 3.9+ recommended
@@ -33,17 +35,24 @@ Run Calibration (Windows PowerShell)
 # python -m pip install opencv-python PyYAML
 
 # Fisheye-only stereo calibration
-python "g:\GithubProject\ReconS\stereo-cam-calib\stereo_calibrate_opencv.py" `
-		--left  "g:\GithubProject\ReconS\stereo-cam-calib\cali_data1\workspace_cali\front_stereo_cam_left" `
-		--right "g:\GithubProject\ReconS\stereo-cam-calib\cali_data1\workspace_cali\front_stereo_cam_right" `
+python "g:\GithubProject\ReconS\cam-calib\stereo_calibrate_opencv.py" `
+		--left  "g:\GithubProject\ReconS\cam-calib\cali_data1\workspace_cali\front_stereo_cam_left" `
+		--right "g:\GithubProject\ReconS\cam-calib\cali_data1\workspace_cali\front_stereo_cam_right" `
 		--pattern-size 8 6 `   # inner corners (rows cols); use 6 8 if rotated
 		--square-size 0.027 `  # meters
-		--max-pairs 0 `        # 0 = use all matched pairs
 		--preview              # optional; shows detection/rectification windows
-		--analyze              # optional; prints coverage/sharpness stats
+
+# Fisheye-only mono calibration
+python "g:\GithubProject\ReconS\cam-calib\mono_calibrate_opencv.py" `
+		--images "g:\GithubProject\ReconS\cam-calib\cali_data1\workspace_cali\front_stereo_cam_left" `
+		--pattern-size 8 6 `   # inner corners (rows cols); use 6 8 if rotated
+		--square-size 0.027 `  # meters
+		--preview              # optional; shows detection/undistortion windows
+		--analyze              # optional; prints coverage/sharpness summary
 ```
 
 Output
+Stereo output
 - One YAML saved alongside the left/right folders: `{save_prefix}_result.yaml` (default `stereo_result.yaml`).
 - Intrinsics (per camera):
 	- `K1`, `K2`: 3x3 camera matrices `[fx 0 cx; 0 fy cy; 0 0 1]`.
@@ -58,15 +67,24 @@ Output
 - Quality metric:
 	- `rms`: stereo reprojection RMS reported by OpenCV (lower is better).
 
+Mono output
+- One YAML saved alongside the images folder: `{images_folder}_result.yaml` (or `{save_prefix}_result.yaml` if provided).
+- Intrinsics:
+	- `K`: 3x3 camera matrix `[fx 0 cx; 0 fy cy; 0 0 1]`.
+	- `D`: fisheye distortion coefficients `[k1, k2, k3, k4]`.
+- Metadata:
+	- `image_size`: `[width, height]`.
+	- `rms`: mono reprojection RMS reported by OpenCV (lower is better).
+
 Console Notes
-- Shows matched/valid pairs, detection time, RMS, baseline, and rectification time.
-- Pairs with failed corner detection are skipped; at least 5 valid pairs are required.
+- Shows matched/valid images, RMS, and baseline (stereo).
+- Images with failed corner detection are skipped; at least 5 valid images/pairs are required.
+- Mono: use --analyze to print coverage and sharpness summary for valid images.
 
 Tips
 - Keep the board large and move it to edges/corners with varied tilt/depth for better fisheye conditioning.
 - Ensure left/right images are synchronized and the same resolution.
 - If detection fails, double-check `--pattern-size` and `--square-size`.
-- Use `--max-pairs` to limit to a clean subset while debugging.
 
 Camera used: 1080p USB2.0 UVC camera with ~130° wide angle (purchase link: https://www.amazon.com/dp/B0CNCSFQC1?ref=ppx_yo2ov_dt_b_fed_asin_title).
 
