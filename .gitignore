@@ -11,3 +11,4 @@ nvblox_ex/__pycache__/
 cam-calib/cali_data1
 depth_feature/build/
 depth_feature/models/
+outputs/

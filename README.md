@@ -10,3 +10,18 @@ source .venv/bin/activate
  in folder cam-calib
 
 2. voltage affect the camera recording stall 5v 2.5-3A better for 
+
+
+## pycuslam for rgbd
+LD_LIBRARY_PATH=$CONDA_PREFIX/lib:/usr/lib/wsl/lib:$LD_LIBRARY_PATH \
+  python3 run_pycuvslam_rgbd.py \
+    --rgb-dir data/sample_20260117_205753/left \
+    --depth-dir data/sample_20260117_205753/left_depth \
+    --calibration data/sample_20260117_205753/left_calibration.yaml \
+    --timestamps data/sample_20260117_205753/timestamps.txt \
+    --depth-scale 1000 \
+    --enable-slam \
+    --undistort \
+    --distortion-model fisheye \
+    --preview \
+    --show-features
