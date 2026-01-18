@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """
 Generate a pyCuSFM-compatible frames_meta.json from:
-1) A newline-delimited JSON timestamp file (frames_time.json)
+1) A newline-delimited JSON timestamp file (frames_time.json) or a CSV timestamps
+   file (timestamps.txt) with columns frame/filename,timestamp_ns
 2) A stereo calibration YAML (K1/D1/R1/P1/K2/D2/R2/P2/R/T)
 
 Output is written next to the timestamp file.
 """
 
 import argparse
+import csv
 import json
 import math
 from pathlib import Path
@@ -25,24 +27,116 @@ RIGHT_CAMERA_PARAMS_ID = "1"
 
 
 def read_timestamps(path: Path) -> List[Dict[str, Any]]:
-    entries: List[Dict[str, Any]] = []
-    with path.open("r", encoding="utf-8") as f:
-        for line_no, line in enumerate(f, start=1):
-            line = line.strip()
-            if not line:
-                continue
+    lines = [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    if not lines:
+        raise ValueError("No timestamp rows found")
+
+    if lines[0].lstrip().startswith("{"):
+        entries: List[Dict[str, Any]] = []
+        for line_no, line in enumerate(lines, start=1):
             try:
                 obj = json.loads(line)
             except json.JSONDecodeError as e:
                 raise ValueError(f"Invalid JSON on line {line_no}: {e}")
-            if "filename" not in obj or "timestamp_ns" not in obj:
-                raise ValueError(f"Missing keys on line {line_no}; need 'filename' and 'timestamp_ns'")
+            filename = obj.get("filename", None)
+            if filename is None:
+                filename = obj.get("frame", None)
+            if filename is None or "timestamp_ns" not in obj:
+                raise ValueError(
+                    f"Missing keys on line {line_no}; need 'filename' (or 'frame') and 'timestamp_ns'"
+                )
             entries.append(
-                {"filename": str(obj["filename"]), "timestamp_ns": int(obj["timestamp_ns"])}
+                {"filename": str(filename), "timestamp_ns": int(obj["timestamp_ns"])}
+            )
+        return entries
+
+    rows = list(csv.reader(lines))
+    if not rows:
+        raise ValueError("No timestamp rows found")
+    header = [h.strip() for h in rows[0]]
+    header_lower = [h.lower() for h in header]
+    has_header = any(
+        key in header_lower for key in ("frame", "filename", "timestamp_ns")
+    )
+    entries = []
+    if has_header:
+        for line_no, row in enumerate(csv.DictReader(lines), start=2):
+            if not row:
+                continue
+            normalized = {
+                (k.strip().lower() if k else ""): (v.strip() if isinstance(v, str) else v)
+                for k, v in row.items()
+                if k is not None
+            }
+            if not any(normalized.values()):
+                continue
+            filename = normalized.get("filename") or normalized.get("frame")
+            timestamp_ns = normalized.get("timestamp_ns")
+            if filename is None or timestamp_ns in (None, ""):
+                raise ValueError(
+                    f"Missing keys on line {line_no}; need 'frame'/'filename' and 'timestamp_ns'"
+                )
+            entries.append(
+                {"filename": str(filename), "timestamp_ns": int(timestamp_ns)}
+            )
+    else:
+        for line_no, row in enumerate(rows, start=1):
+            if not row or not any(cell.strip() for cell in row):
+                continue
+            if len(row) < 2:
+                raise ValueError(f"Expected two columns on line {line_no}")
+            filename = row[0].strip()
+            timestamp_ns = row[1].strip()
+            entries.append(
+                {"filename": str(filename), "timestamp_ns": int(timestamp_ns)}
             )
     if not entries:
         raise ValueError("No timestamp rows found")
     return entries
+
+
+def resolve_frame_filename(name: str, left_dir: Path, right_dir: Path) -> str:
+    raw = str(name).strip()
+    if not raw:
+        raise ValueError("Empty filename in timestamps file")
+    path = Path(raw)
+    if len(path.parts) > 1:
+        if len(path.parts) == 2 and path.parts[0] in {left_dir.name, right_dir.name}:
+            raw = path.name
+        else:
+            raise ValueError(
+                f"Timestamp filename '{raw}' must be a basename or in {left_dir.name}/"
+                f" or {right_dir.name}/"
+            )
+
+    if Path(raw).suffix:
+        filename = raw
+        left_path = left_dir / filename
+        right_path = right_dir / filename
+        if not left_path.is_file():
+            raise ValueError(f"Missing left image: {left_path}")
+        if not right_path.is_file():
+            raise ValueError(f"Missing right image: {right_path}")
+        return filename
+
+    candidates = sorted(left_dir.glob(f"{raw}.*"))
+    if not candidates:
+        candidates = sorted(right_dir.glob(f"{raw}.*"))
+    if not candidates:
+        raise ValueError(f"Could not find image for frame '{raw}' in {left_dir} or {right_dir}")
+    filename = candidates[0].name
+    left_path = left_dir / filename
+    right_path = right_dir / filename
+    if not left_path.is_file() or not right_path.is_file():
+        raise ValueError(f"Expected {filename} in both {left_dir} and {right_dir}")
+    return filename
+
+
+def resolve_timestamp_filenames(
+    timestamps: List[Dict[str, Any]], left_dir: Path, right_dir: Path
+) -> None:
+    for row in timestamps:
+        row["filename"] = resolve_frame_filename(row["filename"], left_dir, right_dir)
 
 
 def infer_camera_dirs(
@@ -241,7 +335,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Convert frames_time.json + stereo calibration YAML into frames_meta.json for pyCuSFM"
     )
-    parser.add_argument("timestamps", help="Path to newline-delimited JSON timestamps file (frames_time.json)")
+    parser.add_argument(
+        "timestamps",
+        help="Path to timestamps file: JSONL frames_time.json or CSV timestamps.txt "
+        "with frame/filename,timestamp_ns",
+    )
     parser.add_argument("calibration", help="Path to stereo calibration YAML (stereo_result.yaml)")
     parser.add_argument("--left-dir-name", help="Relative folder name for left images (default: auto-detect contains 'left')")
     parser.add_argument("--right-dir-name", help="Relative folder name for right images (default: auto-detect contains 'right')")
@@ -256,6 +354,7 @@ def main() -> None:
     calib = load_calibration(calib_path)
 
     left_dir, right_dir = infer_camera_dirs(dataset_dir, args.left_dir_name, args.right_dir_name)
+    resolve_timestamp_filenames(timestamps, left_dir, right_dir)
 
     sample_image = left_dir / timestamps[0]["filename"]
     image_size = read_image_size(sample_image)
