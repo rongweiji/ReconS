@@ -36,3 +36,6 @@ bash orbslam3_rgbd/run_orbslam3_rgbd.sh \
     --depth-scale 1000 \
     --distortion-model fisheye \
     --viewer
+
+
+## ORBSLAM will faild when fast rotation motion 
