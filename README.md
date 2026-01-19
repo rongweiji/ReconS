@@ -25,3 +25,14 @@ LD_LIBRARY_PATH=$CONDA_PREFIX/lib:/usr/lib/wsl/lib:$LD_LIBRARY_PATH \
     --distortion-model fisheye \
     --preview \
     --show-features
+
+
+## orbslam for rgbd 
+bash orbslam3_rgbd/run_orbslam3_rgbd.sh \
+    --rgb-dir data/sample_20260117_205753/left \
+    --depth-dir data/sample_20260117_205753/left_depth \
+    --calibration data/sample_20260117_205753/left_calibration.yaml \
+    --timestamps data/sample_20260117_205753/timestamps.txt \
+    --depth-scale 1000 \
+    --distortion-model fisheye \
+    --viewer
