@@ -42,3 +42,9 @@ adds `/usr/lib/wsl/lib` to `LD_LIBRARY_PATH` automatically.
 
 If `--out-dir` is omitted, outputs go to a sibling folder named
 `<rgb_dir>_depth` (for example, `left_depth`).
+
+command example 
+bash depth_feature/run_depth_from_rgb.sh \
+    --rgb-dir data/sample_20260119/iphone_mono \
+    --out-dir data/sample_20260119/iphone_mono_depth \
+    --calibration data/sample_20260119/iphone_calibration
