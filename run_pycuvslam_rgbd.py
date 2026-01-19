@@ -202,7 +202,16 @@ def main() -> int:
         print(f"No timestamps found in {args.timestamps}", file=sys.stderr)
         return 1
 
+    # Resolve RGB extension: try requested, then fallbacks (.png/.jpg/.jpeg).
     first_rgb = args.rgb_dir / f"{timestamps[0][0]}{rgb_ext}"
+    if not first_rgb.exists():
+        for alt in [".png", ".jpg", ".jpeg"]:
+            candidate = args.rgb_dir / f"{timestamps[0][0]}{alt}"
+            if candidate.exists():
+                rgb_ext = alt
+                first_rgb = candidate
+                print(f"First RGB frame not found with {args.rgb_ext}; using '{alt}' instead.", file=sys.stderr)
+                break
     if not first_rgb.exists():
         print(f"First RGB frame not found: {first_rgb}", file=sys.stderr)
         return 1

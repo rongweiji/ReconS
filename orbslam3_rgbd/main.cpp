@@ -5,6 +5,9 @@
 
 #include <opencv2/opencv.hpp>
 
+#include <rerun.hpp>
+#include <rerun/archetypes/pinhole.hpp>
+
 #include <Eigen/Core>
 
 #include <algorithm>
@@ -13,11 +16,15 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <vector>
+#include <array>
+#include <utility>
 
 namespace fs = std::filesystem;
+namespace rr = rerun;
 
 struct Options {
   std::string rgb_dir;
@@ -40,6 +47,9 @@ struct Options {
   bool save_keyframes = false;
   int max_frames = -1;
   bool skip_missing = false;
+  bool rerun_enabled = false;
+  bool rerun_spawn = false;
+  std::string rerun_addr = "rerun+http://127.0.0.1:9876/proxy";
 };
 
 struct FrameEntry {
@@ -92,6 +102,9 @@ static void print_usage(const char * prog)
             << "  --viewer               Enable Pangolin viewer\n"
             << "  --max-frames N         Limit number of frames\n"
             << "  --skip-missing         Skip missing frames instead of failing\n"
+            << "  --rerun                Enable Rerun logging\n"
+            << "  --rerun-spawn          Spawn a Rerun viewer (otherwise connect to --rerun-addr)\n"
+            << "  --rerun-addr URL       Rerun gRPC URL (default: rerun+http://127.0.0.1:9876/proxy)\n"
             << "  -h, --help             Show this message\n";
 }
 
@@ -149,6 +162,14 @@ static Options parse_args(int argc, char ** argv)
       opt.max_frames = std::stoi(next());
     } else if (arg == "--skip-missing") {
       opt.skip_missing = true;
+    } else if (arg == "--rerun") {
+      opt.rerun_enabled = true;
+    } else if (arg == "--rerun-spawn") {
+      opt.rerun_enabled = true;
+      opt.rerun_spawn = true;
+    } else if (arg == "--rerun-addr") {
+      opt.rerun_enabled = true;
+      opt.rerun_addr = next();
     } else if (arg == "-h" || arg == "--help") {
       print_usage(argv[0]);
       std::exit(0);
@@ -353,6 +374,35 @@ int main(int argc, char ** argv)
     opt.camera_fps = estimate_fps(frames, 30.0);
   }
 
+  // Rerun setup (optional)
+  std::unique_ptr<rr::RecordingStream> rerun_stream;
+  if (opt.rerun_enabled) {
+    rerun_stream = std::make_unique<rr::RecordingStream>("ORB-SLAM3 RGBD");
+    rr::Error err;
+    if (opt.rerun_spawn) {
+      err = rerun_stream->spawn();
+    } else {
+      err = rerun_stream->connect_grpc(opt.rerun_addr);
+    }
+    if (err.is_err()) {
+      std::cerr << "Failed to start Rerun stream: " << err.description << "\n";
+      rerun_stream.reset();
+    } else {
+      rerun_stream->set_global();
+      const float fx = static_cast<float>(new_k.at<double>(0, 0));
+      const float fy = static_cast<float>(new_k.at<double>(1, 1));
+      const float cx = static_cast<float>(new_k.at<double>(0, 2));
+      const float cy = static_cast<float>(new_k.at<double>(1, 2));
+      (void)cx;
+      (void)cy;
+      auto pinhole = rr::Pinhole::from_focal_length_and_resolution(
+        {fx, fy},
+        {static_cast<float>(calib.width), static_cast<float>(calib.height)}
+      );
+      rerun_stream->log_static("world/camera", pinhole);
+    }
+  }
+
   fs::create_directories(opt.out_dir);
   const fs::path config_path = fs::path(opt.out_dir) / "orbslam3_runtime.yaml";
   if (!write_orbslam_config(config_path.string(), new_k, calib.width, calib.height, opt.camera_fps, opt.depth_scale)) {
@@ -366,6 +416,8 @@ int main(int argc, char ** argv)
             << "Output: " << opt.out_path << "\n";
 
   ORB_SLAM3::System slam(opt.vocab_path, config_path.string(), ORB_SLAM3::System::RGBD, opt.viewer);
+
+  std::vector<rr::datatypes::Vec3D> trajectory;
 
   int processed = 0;
   int tracked = 0;
@@ -415,6 +467,56 @@ int main(int argc, char ** argv)
       tracking_state == ORB_SLAM3::Tracking::OK_KLT;
     if (tracking_ok) {
       ++tracked;
+    }
+
+    if (rerun_stream) {
+      rerun_stream->set_time_timestamp_secs_since_epoch("time", entry.timestamp_sec);
+
+      cv::Mat rgb_rgb;
+      cv::cvtColor(rgb, rgb_rgb, cv::COLOR_BGR2RGB);
+      rerun_stream->log(
+        "world/camera/image",
+        rr::Image(
+          rr::Collection<uint8_t>::borrow(
+            rgb_rgb.data, static_cast<size_t>(rgb_rgb.total() * rgb_rgb.channels())),
+          {static_cast<uint32_t>(rgb_rgb.cols), static_cast<uint32_t>(rgb_rgb.rows)},
+          rr::datatypes::ColorModel::RGB,
+          rr::datatypes::ChannelDatatype::U8)
+      );
+
+      cv::Mat depth_m;
+      if (depth.type() == CV_16U) {
+        depth.convertTo(depth_m, CV_32F, 1.0 / opt.depth_scale);
+      } else {
+        depth.convertTo(depth_m, CV_32F);
+      }
+      rerun_stream->log(
+        "world/camera/depth",
+        rr::DepthImage(
+          depth_m.data,
+          {static_cast<uint32_t>(depth_m.cols), static_cast<uint32_t>(depth_m.rows)},
+          rr::datatypes::ChannelDatatype::F32)
+      );
+
+      if (tracking_ok) {
+        const Eigen::Matrix4f Twc = Tcw.inverse().matrix();
+        const Eigen::Vector3f t = Twc.block<3, 1>(0, 3);
+        Eigen::Quaternionf q(Twc.block<3, 3>(0, 0));
+        rerun_stream->log(
+          "world/camera/transform",
+          rr::Transform3D()
+            .with_translation({t.x(), t.y(), t.z()})
+            .with_rotation(rr::datatypes::Quaternion{q.x(), q.y(), q.z(), q.w()})
+        );
+        trajectory.emplace_back(t.x(), t.y(), t.z());
+        // Copy trajectory into an owned collection to avoid lifetime issues when it grows.
+        auto traj_copy = trajectory;
+        rr::components::LineStrip3D strip(rr::Collection<rr::datatypes::Vec3D>::take_ownership(std::move(traj_copy)));
+        rerun_stream->log(
+          "world/camera/path",
+          rr::LineStrips3D(rr::Collection<rr::components::LineStrip3D>::take_ownership(std::move(strip)))
+        );
+      }
     }
 
     ++processed;

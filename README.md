@@ -12,6 +12,10 @@ source .venv/bin/activate
 2. voltage affect the camera recording stall 5v 2.5-3A better for 
 
 
+# using the conda to run the pycuslam: 
+export PATH=/home/wayne/miniconda3/bin:$PATH   # if conda not on PATH
+  source /home/wayne/miniconda3/etc/profile.d/conda.sh
+  conda activate pycuvslam   # replace with the env that has cuvslam
 ## pycuslam for rgbd
 LD_LIBRARY_PATH=$CONDA_PREFIX/lib:/usr/lib/wsl/lib:$LD_LIBRARY_PATH \
   python3 run_pycuvslam_rgbd.py \
