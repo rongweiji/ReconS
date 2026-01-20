@@ -14,15 +14,17 @@ Env setup (example):
 - `run_nvblox.py`: feed RGB + depth + calibration + TUM poses + timestamps into `nvblox_torch` to produce a mesh and optional UI visualization.
 - `run_pycuvslam_stereo.py`: stereo variant for PyCuVSLAM (left/right + depths).
 
-### PyCuVSLAM RGBD (headless)
+### PyCuVSLAM RGBD 
 
 ```bash
+LD_LIBRARY_PATH=$CONDA_PREFIX/lib:/usr/lib/wsl/lib:$LD_LIBRARY_PATH \
 python3 pipelines/run_pycuvslam_rgbd.py \
   --rgb-dir data/sample_20260119_i4/iphone_mono \
   --depth-dir data/sample_20260119_i4/iphone_mono_depth \
   --calibration data/sample_20260119_i4/iphone_calibration.yaml \
   --timestamps data/sample_20260119_i4/timestamps.txt \
-  --enable-slam
+  --enable-slam \
+  --preview
 ```
 
 Defaults write poses to `data/sample_20260119_i4/cuvslam_poses.tum`. Also write `cuvslam_poses_slam.tum`.
