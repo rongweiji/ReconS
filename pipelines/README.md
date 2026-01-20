@@ -30,9 +30,9 @@ python data_prepare.py data/phone_sample1
 - `alignment_<video_stem>.png` ... alignment visualization
 - `alignment_<video_stem>.json` ... alignment summary metrics
 
-## nvblox_torch Runner (phone_sample*)
+## nvblox_torch Runner (generic RGBD)
 
-`run_nvblox_phone_sample3.py` replays a prepared `phone_sample*` dataset into `nvblox_torch` and exports a reconstructed mesh.
+`run_nvblox.py` replays raw RGB + depth + poses into `nvblox_torch` and exports a reconstructed mesh.
 
 ### Requirements
 
@@ -44,31 +44,30 @@ python data_prepare.py data/phone_sample1
 
 ### Basic usage (headless)
 
-```bash
-python3 nvblox_ex/run_nvblox_phone_sample3.py \
-  --dataset nvblox_ex/data/phone_sample3 \
-  --out_dir nvblox_ex/data/phone_sample3/nvblox_out
-```
-
-This writes `mesh.ply` into `--out_dir` (the script falls back to `mapper.get_color_mesh().save(...)` if the mapper does not expose a direct export method).
-
-### Live Qt UI (mesh + pose + path)
+Inputs: RGB frames, aligned depth frames, calibration YAML (K), TUM poses, timestamps.txt.
 
 ```bash
-python3 nvblox_ex/run_nvblox_phone_sample3.py \
-  --dataset nvblox_ex/data/phone_sample3 \
-  --out_dir nvblox_ex/data/phone_sample3/nvblox_out \
-  --ui
+python3 nvblox_ex/run_nvblox.py \
+  --rgb-dir data/sample_20260119_i4/iphone_mono \
+  --depth-dir data/sample_20260119_i4/iphone_mono_depth \
+  --calibration data/sample_20260119_i4/iphone_calibration.yaml \
+  --poses data/sample_20260119_i4/pycuvslam_poses.tum \
+  --timestamps data/sample_20260119_i4/timestamps.txt \
+  --out_dir data/sample_20260119_i4/nvblox_out
 ```
+
+This writes `mesh.ply` into `--out_dir` (falls back to `mapper.get_color_mesh().save(...)` if the mapper lacks a direct export). Add `--ui` for the Qt viewer.
 
 ### Key parameters
 
-- `--dataset`: Path to a `phone_sample*` folder containing `associations.txt`, `CameraTrajectory.csv`, and frame subfolders.
-- `--out_dir`: Output folder for reconstructed artifacts (e.g., `mesh.ply`).
-- `--intrinsics_json`: Intrinsics file (defaults to `nvblox_ex/iphone_intrinsics.json`).
+- `--rgb-dir`, `--depth-dir`: Frame folders (depth must align to RGB).
+- `--calibration`: YAML with K; intrinsics are built from it.
+- `--poses`: TUM pose file (timestamp tx ty tz qx qy qz qw).
+- `--timestamps`: CSV with frame,timestamp_ns.
+- `--out_dir`: Output folder for reconstructed artifacts (default: sibling `nvblox_out`).
 - `--voxel_size_m`: Voxel resolution (smaller = more detail, slower/more memory).
 - `--max_integration_distance_m`: Depth truncation / max integration distance.
-- `--depth_scale`: Meters per depth unit (phone samples use uint16 millimeters → `0.001`).
+- `--depth_scale`: Meters per depth unit (uint16 millimeters → `0.001`).
 - `--mesh_every`: Update mesh every N frames (affects UI refresh cadence).
 - `--invert_pose`: Invert each pose before integration (use if your trajectory is `T_C_W` instead of `T_W_C`).
 - `--ui`: Show live Qt mesh viewer while integrating.
