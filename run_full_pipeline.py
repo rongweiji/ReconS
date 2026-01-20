@@ -6,12 +6,12 @@ End-to-end pipeline:
 3) Build nvblox dataset artifacts (associations.txt, CameraTrajectory.csv, intrinsics JSON).
 4) Run nvblox mapper to export a mesh.
 
-Inputs (required): dataset folder containing
-  - iphone_mono/           RGB frames (e.g., 0000001.png)
-  - iphone_calibration.yaml
-  - timestamps.txt         CSV with frame,timestamp_ns
+Inputs: point to RGB frames, calibration YAML, and timestamps.txt. You can still
+pass --dataset to use its default layout, but --dataset is no longer required.
+When --dataset is omitted, defaults live next to --rgb-dir (e.g.,
+<rgb-dir>/../iphone_calibration.yaml).
 
-Outputs (default locations inside --dataset):
+Outputs (default locations inside --dataset or parent of --rgb-dir):
   - iphone_mono_depth/            Generated depth PNGs (mm, uint16)
   - pycuvslam_poses.tum           TUM trajectory from PyCuVSLAM
   - CameraTrajectory.csv          Trajectory for nvblox
@@ -94,7 +94,7 @@ def _write_associations(
     timestamps: Sequence[Tuple[str, int]],
     rgb_dir: Path,
     depth_dir: Path,
-    dataset: Path,
+    base_dir: Path,
     rgb_ext: str,
     depth_ext: str,
     out_path: Path,
@@ -106,8 +106,8 @@ def _write_associations(
         depth = depth_dir / f"{frame_id}{depth_ext}"
         if not rgb.exists() or not depth.exists():
             continue
-        rgb_rel = os.path.relpath(rgb, dataset)
-        depth_rel = os.path.relpath(depth, dataset)
+        rgb_rel = os.path.relpath(rgb, base_dir)
+        depth_rel = os.path.relpath(depth, base_dir)
         lines.append(f"{ts_sec:.6f} {rgb_rel} {ts_sec:.6f} {depth_rel}")
     if not lines:
         raise ValueError("No associations written (missing frames?).")
@@ -171,33 +171,46 @@ def main() -> int:
     repo_root = Path(__file__).resolve().parent
 
     parser = argparse.ArgumentParser(description="End-to-end: depth -> PyCuVSLAM -> nvblox.")
-    parser.add_argument("--dataset", type=Path, required=True, help="Dataset folder with iphone_mono, calibration, timestamps.txt")
-    parser.add_argument("--rgb-dir", type=Path, help="RGB folder (default: <dataset>/iphone_mono)")
-    parser.add_argument("--depth-dir", type=Path, help="Depth output folder (default: <dataset>/iphone_mono_depth)")
-    parser.add_argument("--calibration", type=Path, help="Calibration YAML (default: <dataset>/iphone_calibration.yaml)")
-    parser.add_argument("--timestamps", type=Path, help="timestamps.txt (default: <dataset>/timestamps.txt)")
+    parser.add_argument(
+        "--dataset",
+        type=Path,
+        help="Optional dataset folder. Defaults for rgb/calibration/timestamps/depth are derived from this if provided.",
+    )
+    parser.add_argument("--rgb-dir", type=Path, help="RGB folder (default: <dataset>/iphone_mono; required if --dataset is omitted)")
+    parser.add_argument("--depth-dir", type=Path, help="Depth output folder (default: <base>/iphone_mono_depth; base is dataset or RGB parent)")
+    parser.add_argument("--calibration", type=Path, help="Calibration YAML (default: <base>/iphone_calibration.yaml)")
+    parser.add_argument("--timestamps", type=Path, help="timestamps.txt (default: <base>/timestamps.txt)")
     parser.add_argument("--depth-scale", type=float, default=1000.0, help="Depth scale used for PNG export (value per meter).")
     parser.add_argument("--force-poses", action="store_true", help="Regenerate poses even if TUM file exists.")
     parser.add_argument("--depth-engine", type=Path, help="Optional override for Depth Anything TensorRT engine.")
     parser.add_argument("--nvblox-mode", choices=["colormesh", "solidmesh", "esdf", "tsdf", "pointcloud"], default="colormesh")
     parser.add_argument("--nvblox-ui", action="store_true", help="Show nvblox Qt UI.")
-    parser.add_argument("--nvblox-out", type=Path, help="Output folder for nvblox (default: <dataset>/nvblox_out)")
+    parser.add_argument("--nvblox-out", type=Path, help="Output folder for nvblox (default: <base>/nvblox_out)")
     parser.add_argument("--skip-nvblox", action="store_true", help="Run depth + poses + dataset prep, skip nvblox.")
     args = parser.parse_args()
 
-    dataset = args.dataset.expanduser().resolve()
-    if not dataset.is_dir():
+    dataset = args.dataset.expanduser().resolve() if args.dataset else None
+    if dataset and not dataset.is_dir():
         raise SystemExit(f"Dataset not found: {dataset}")
 
-    rgb_dir = (args.rgb_dir or dataset / "iphone_mono").resolve()
-    depth_dir = (args.depth_dir or dataset / "iphone_mono_depth").resolve()
-    calib_path = (args.calibration or dataset / "iphone_calibration.yaml").resolve()
-    ts_path = (args.timestamps or dataset / "timestamps.txt").resolve()
-    tum_out = dataset / "pycuvslam_poses.tum"
-    associations_path = dataset / "associations.txt"
-    cam_traj_path = dataset / "CameraTrajectory.csv"
-    intrinsics_json = dataset / "intrinsics_auto.json"
-    nvblox_out = (args.nvblox_out or dataset / "nvblox_out").resolve()
+    default_rgb = dataset / "iphone_mono" if dataset else None
+    rgb_dir_input = args.rgb_dir or default_rgb
+    if not rgb_dir_input:
+        raise SystemExit("Provide --rgb-dir when --dataset is not set.")
+    rgb_dir = rgb_dir_input.expanduser().resolve()
+    if not rgb_dir.is_dir():
+        raise SystemExit(f"RGB folder not found: {rgb_dir}")
+
+    base_dir = dataset if dataset else rgb_dir.parent
+
+    depth_dir = (args.depth_dir or base_dir / "iphone_mono_depth").expanduser().resolve()
+    calib_path = (args.calibration or base_dir / "iphone_calibration.yaml").expanduser().resolve()
+    ts_path = (args.timestamps or base_dir / "timestamps.txt").expanduser().resolve()
+    tum_out = base_dir / "pycuvslam_poses.tum"
+    associations_path = base_dir / "associations.txt"
+    cam_traj_path = base_dir / "CameraTrajectory.csv"
+    intrinsics_json = base_dir / "intrinsics_auto.json"
+    nvblox_out = (args.nvblox_out or base_dir / "nvblox_out").expanduser().resolve()
 
     # Step 1: Depth generation
     depth_cmd: list[str] = [str(repo_root / "depth_feature" / "run_depth_from_rgb.sh"), "--rgb-dir", str(rgb_dir), "--calibration", str(calib_path), "--out-dir", str(depth_dir), "--depth-scale", str(args.depth_scale)]
@@ -234,7 +247,7 @@ def main() -> int:
 
     # Step 3: Dataset artifacts for nvblox
     _tum_to_csv(tum_out, cam_traj_path)
-    _write_associations(timestamps, rgb_dir, depth_dir, dataset, rgb_ext, depth_ext, associations_path)
+    _write_associations(timestamps, rgb_dir, depth_dir, base_dir, rgb_ext, depth_ext, associations_path)
     sample_rgb = _find_frame(rgb_dir, first_frame, [rgb_ext])
     _write_intrinsics_json(intrinsics_json, calib_path, sample_rgb)
 

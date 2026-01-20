@@ -17,6 +17,7 @@ References:
   ```
   Replace `<cu12x build>` and wheel path with the CUDA build you have (cu12 wheels run on CUDA 13 drivers).
 - On WSL add GUI libs if needed and keep `LD_LIBRARY_PATH=$CONDA_PREFIX/lib:/usr/lib/wsl/lib:$LD_LIBRARY_PATH` for cuvslam.
+- If `conda` is missing after install, run `~/miniconda3/bin/conda init bash`, then `source ~/.bashrc` (or reopen a shell) so `conda` is on your PATH.
 
 ## Data layout (per sample)
 ```
@@ -27,7 +28,7 @@ data/sample_xxx/
   timestamps.txt           # frame,timestamp_ns
 ```
 
-Outputs land alongside the sample:
+Outputs land alongside the sample (or next to your provided RGB folder):
 - `cuvslam_poses.tum` (and `cuvslam_poses_slam.tum` if SLAM enabled)
 - `nvblox_out/mesh.ply` (+ voxel exports)
 - depth folder is regenerated if missing.
@@ -35,11 +36,13 @@ Outputs land alongside the sample:
 ## One-shot pipeline
 ```bash
 python3 run_full_pipeline.py \
-  --dataset data/sample_20260119_i4 \
+  --rgb-dir data/sample_20260119_i4/iphone_mono \
+  --calibration data/sample_20260119_i4/iphone_calibration.yaml \
+  --timestamps data/sample_20260119_i4/timestamps.txt \
   --nvblox-mode colormesh \
   --nvblox-ui   # drop if headless
 ```
-This runs depth generation, PyCuVSLAM, builds nvblox artifacts, and runs nvblox with Rerun UI when `--nvblox-ui` is set.
+This runs depth generation, PyCuVSLAM, builds nvblox artifacts, and runs nvblox with Rerun UI when `--nvblox-ui` is set. You can still pass `--dataset <folder>` to use the default filenames (`iphone_mono`, `iphone_calibration.yaml`, `timestamps.txt`), but `--dataset` is optional—any folder names work when you provide the three paths.
 
 ## Individual runners
 See `pipelines/README.md` for per-step commands (`run_pycuvslam_rgbd.py`, `run_nvblox.py`, stereo variant, etc.).
