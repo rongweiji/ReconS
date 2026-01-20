@@ -29,15 +29,15 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Iterable, List, Sequence, Tuple
+from typing import Iterable, List, Mapping, Sequence, Tuple
 
 import yaml
 from PIL import Image
 
 
-def _run(cmd: Sequence[str], *, cwd: Path | None = None) -> None:
+def _run(cmd: Sequence[str], *, cwd: Path | None = None, env: Mapping[str, str] | None = None) -> None:
     print(f"[cmd] {' '.join(cmd)}")
-    subprocess.run(cmd, cwd=str(cwd) if cwd else None, check=True)
+    subprocess.run(cmd, cwd=str(cwd) if cwd else None, env=dict(env) if env else None, check=True)
 
 
 def _parse_timestamps(path: Path) -> List[Tuple[str, int]]:
@@ -167,6 +167,27 @@ def _write_intrinsics_json(in_path: Path, calib_path: Path, rgb_sample: Path) ->
     in_path.write_text(json.dumps(payload, indent=2))
 
 
+def _env_with_conda_lib(env: Mapping[str, str]) -> dict[str, str]:
+    """Ensure native deps see conda lib/ first and WSL's libcuda shim if present."""
+    merged = dict(env)
+    ld_parts: list[str] = []
+
+    conda_prefix = merged.get("CONDA_PREFIX")
+    if conda_prefix:
+        ld_parts.append(str(Path(conda_prefix) / "lib"))
+
+    wsl_lib = Path("/usr/lib/wsl/lib")
+    if wsl_lib.is_dir():
+        ld_parts.append(str(wsl_lib))
+
+    if merged.get("LD_LIBRARY_PATH"):
+        ld_parts.append(merged["LD_LIBRARY_PATH"])
+
+    if ld_parts:
+        merged["LD_LIBRARY_PATH"] = ":".join(ld_parts)
+    return merged
+
+
 def main() -> int:
     repo_root = Path(__file__).resolve().parent
 
@@ -183,11 +204,17 @@ def main() -> int:
     parser.add_argument("--depth-scale", type=float, default=1000.0, help="Depth scale used for PNG export (value per meter).")
     parser.add_argument("--force-poses", action="store_true", help="Regenerate poses even if TUM file exists.")
     parser.add_argument("--depth-engine", type=Path, help="Optional override for Depth Anything TensorRT engine.")
+    parser.add_argument("--disable-slam", action="store_true", help="Skip PyCuVSLAM SLAM backend (pose graph + loop closure).")
+    parser.add_argument("--use-odom-poses", action="store_true", help="Use odometry poses for downstream artifacts/nvblox instead of SLAM.")
     parser.add_argument("--nvblox-mode", choices=["colormesh", "solidmesh", "esdf", "tsdf", "pointcloud"], default="colormesh")
     parser.add_argument("--nvblox-ui", action="store_true", help="Show nvblox Qt UI.")
     parser.add_argument("--nvblox-out", type=Path, help="Output folder for nvblox (default: <base>/nvblox_out)")
     parser.add_argument("--skip-nvblox", action="store_true", help="Run depth + poses + dataset prep, skip nvblox.")
     args = parser.parse_args()
+
+    # Defaults: run SLAM and feed SLAM poses to downstream unless explicitly disabled.
+    args.enable_slam = not args.disable_slam
+    args.use_slam_poses = not args.use_odom_poses and args.enable_slam
 
     dataset = args.dataset.expanduser().resolve() if args.dataset else None
     if dataset and not dataset.is_dir():
@@ -207,23 +234,27 @@ def main() -> int:
     calib_path = (args.calibration or base_dir / "iphone_calibration.yaml").expanduser().resolve()
     ts_path = (args.timestamps or base_dir / "timestamps.txt").expanduser().resolve()
     tum_out = base_dir / "pycuvslam_poses.tum"
+    slam_tum_out = base_dir / "pycuvslam_poses_slam.tum"
     associations_path = base_dir / "associations.txt"
     cam_traj_path = base_dir / "CameraTrajectory.csv"
+    cam_traj_slam_path = base_dir / "CameraTrajectory_slam.csv"
     intrinsics_json = base_dir / "intrinsics_auto.json"
     nvblox_out = (args.nvblox_out or base_dir / "nvblox_out").expanduser().resolve()
 
     # Step 1: Depth generation
+    base_env = _env_with_conda_lib(os.environ)
+
     depth_cmd: list[str] = [str(repo_root / "depth_feature" / "run_depth_from_rgb.sh"), "--rgb-dir", str(rgb_dir), "--calibration", str(calib_path), "--out-dir", str(depth_dir), "--depth-scale", str(args.depth_scale)]
     if args.depth_engine:
         depth_cmd.extend(["--engine", str(args.depth_engine)])
-    _run(depth_cmd)
+    _run(depth_cmd, env=base_env)
 
     # Step 2: PyCuVSLAM RGBD
-    need_poses = args.force_poses or not tum_out.exists()
+    need_poses = args.force_poses or not tum_out.exists() or (args.enable_slam and not slam_tum_out.exists())
     if need_poses:
         slam_cmd = [
             sys.executable,
-            str(repo_root / "run_pycuvslam_rgbd.py"),
+            str(repo_root / "pipelines" / "run_pycuvslam_rgbd.py"),
             "--rgb-dir",
             str(rgb_dir),
             "--depth-dir",
@@ -237,7 +268,10 @@ def main() -> int:
             "--out",
             str(tum_out),
         ]
-        _run(slam_cmd)
+        if args.enable_slam:
+            slam_cmd.append("--enable-slam")
+            slam_cmd.extend(["--slam-out", str(slam_tum_out)])
+        _run(slam_cmd, env=base_env)
     else:
         print(f"[skip] Pose generation (reuse existing {tum_out})")
 
@@ -247,9 +281,16 @@ def main() -> int:
 
     # Step 3: Dataset artifacts for nvblox
     _tum_to_csv(tum_out, cam_traj_path)
+    if args.enable_slam and slam_tum_out.exists():
+        _tum_to_csv(slam_tum_out, cam_traj_slam_path)
     _write_associations(timestamps, rgb_dir, depth_dir, base_dir, rgb_ext, depth_ext, associations_path)
     sample_rgb = _find_frame(rgb_dir, first_frame, [rgb_ext])
     _write_intrinsics_json(intrinsics_json, calib_path, sample_rgb)
+
+    poses_for_nvblox = slam_tum_out if args.use_slam_poses else tum_out
+    cam_csv_for_nvblox = cam_traj_slam_path if args.use_slam_poses else cam_traj_path
+    if args.use_slam_poses and not slam_tum_out.exists():
+        raise SystemExit(f"Requested SLAM poses for nvblox but missing {slam_tum_out}")
 
     if args.skip_nvblox:
         print("[skip] nvblox run (skip requested)")
@@ -266,7 +307,7 @@ def main() -> int:
         "--calibration",
         str(calib_path),
         "--poses",
-        str(tum_out),
+        str(poses_for_nvblox),
         "--timestamps",
         str(ts_path),
         "--depth_scale",
@@ -278,12 +319,18 @@ def main() -> int:
     ]
     if args.nvblox_ui:
         nvblox_cmd.append("--ui")
-    _run(nvblox_cmd)
+    _run(nvblox_cmd, env=base_env)
 
     print("Done.")
     print(f"Depth dir: {depth_dir}")
     print(f"PyCuVSLAM poses: {tum_out}")
+    if args.enable_slam:
+        print(f"PyCuVSLAM SLAM poses: {slam_tum_out}")
     print(f"Nvblox dataset: {associations_path}, {cam_traj_path}, {intrinsics_json}")
+    if args.enable_slam:
+        print(f"Nvblox dataset (SLAM CSV): {cam_traj_slam_path}")
+    poses_label = "SLAM" if args.use_slam_poses else "odometry"
+    print(f"Nvblox poses source ({poses_label}): {poses_for_nvblox}")
     print(f"Nvblox outputs: {nvblox_out}")
     return 0
 
