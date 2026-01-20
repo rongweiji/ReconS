@@ -963,6 +963,18 @@ def main() -> int:
 
     rerun_enabled = False
     rr = None  # type: ignore
+    def _rr_set_time(frame_idx: int, ts_sec: float) -> None:
+        if rr is None:
+            return
+        if hasattr(rr, "set_time"):
+            rr.set_time("frame", sequence=frame_idx)
+            rr.set_time("time", timestamp=ts_sec)
+        else:
+            # Fallback for older rerun SDKs.
+            if hasattr(rr, "set_time_sequence"):
+                rr.set_time_sequence("frame", frame_idx)
+            if hasattr(rr, "set_time_seconds"):
+                rr.set_time_seconds("time", ts_sec)
     if args.ui:
         try:
             import rerun as rr  # type: ignore
@@ -1080,8 +1092,7 @@ def main() -> int:
         dt_int_ms = (time.perf_counter() - t_int0) * 1000.0
 
         if rerun_enabled:
-            rr.set_time("frame", sequence=idx)
-            rr.set_time("time", timestamp=ts_sec)
+            _rr_set_time(idx, ts_sec)
             rr.log(
                 "world/camera_pose",
                 rr.Transform3D(

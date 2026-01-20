@@ -29,7 +29,7 @@ python3 pipelines/run_pycuvslam_rgbd.py \
 
 Defaults write poses to `data/sample_20260119_i4/cuvslam_poses.tum`. Also write `cuvslam_poses_slam.tum`.
 
-### nvblox (headless)
+### nvblox 
 
 ```bash
 python3 pipelines/run_nvblox.py \
@@ -38,11 +38,11 @@ python3 pipelines/run_nvblox.py \
   --calibration data/sample_20260119_i4/iphone_calibration.yaml \
   --poses data/sample_20260119_i4/cuvslam_poses.tum \
   --timestamps data/sample_20260119_i4/timestamps.txt \
-  --out_dir data/sample_20260119_i4/nvblox_out
+  --out_dir data/sample_20260119_i4/nvblox_out \
+  --ui
 ```
 
-Depth is assumed uint16 millimeters (`--depth_scale 0.001` by default). Add `--ui` for the Rerun viewer.
-
+Depth is assumed uint16 millimeters (`--depth_scale 0.001` by default). 
 ### Full chain (depth → poses → nvblox)
 
 Use the repo root `run_full_pipeline.py` to automate all steps; see its help for flags.

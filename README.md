@@ -1,45 +1,45 @@
 # ReconS
 
-[Nurec Reconstruction](https://docs.nvidia.com/nurec/robotics/neural_reconstruction_stereo.html#)
+End-to-end RGBD pipeline: depth → PyCuVSLAM → nvblox.
 
-```wsl
-source .venv/bin/activate
+References:
+- nvblox: https://nvidia-isaac.github.io/nvblox/index.html
+- Neural reconstruction stereo (NuRec): https://docs.nvidia.com/nurec/robotics/neural_reconstruction_stereo.html
+- Depth generation (Depth Anything TRT): https://github.com/ika-rwth-aachen/ros2-depth-anything-v3-trt
+
+## Environment
+- Use the `pycuvslam` conda env (has `cuvslam`). Install the rest into the same env:
+  ```bash
+  conda activate pycuvslam
+  python -m pip install "torch==<cu12x build>" -f https://download.pytorch.org/whl/torch_stable.html
+  python -m pip install <nvblox_torch_wheel>  # matching CUDA build
+  python -m pip install rerun-sdk opencv-python numpy
+  ```
+  Replace `<cu12x build>` and wheel path with the CUDA build you have (cu12 wheels run on CUDA 13 drivers).
+- On WSL add GUI libs if needed and keep `LD_LIBRARY_PATH=$CONDA_PREFIX/lib:/usr/lib/wsl/lib:$LD_LIBRARY_PATH` for cuvslam.
+
+## Data layout (per sample)
 ```
-## Outcome 
-1. opencv 4.12 version python based calibration for stereo fisheye cameras. 
- in folder cam-calib
+data/sample_xxx/
+  iphone_mono/             # RGB frames (0000001.png ...)
+  iphone_mono_depth/       # Depth frames aligned to RGB (uint16, mm)
+  iphone_calibration.yaml  # Pinhole K
+  timestamps.txt           # frame,timestamp_ns
+```
 
-2. voltage affect the camera recording stall 5v 2.5-3A better for 
+Outputs land alongside the sample:
+- `cuvslam_poses.tum` (and `cuvslam_poses_slam.tum` if SLAM enabled)
+- `nvblox_out/mesh.ply` (+ voxel exports)
+- depth folder is regenerated if missing.
 
+## One-shot pipeline
+```bash
+python3 run_full_pipeline.py \
+  --dataset data/sample_20260119_i4 \
+  --nvblox-mode colormesh \
+  --nvblox-ui   # drop if headless
+```
+This runs depth generation, PyCuVSLAM, builds nvblox artifacts, and runs nvblox with Rerun UI when `--nvblox-ui` is set.
 
-# using the conda to run the pycuslam: 
-export PATH=/home/wayne/miniconda3/bin:$PATH   # if conda not on PATH
-  source /home/wayne/miniconda3/etc/profile.d/conda.sh
-  conda activate pycuvslam   # replace with the env that has cuvslam
-## pycuslam for rgbd
-LD_LIBRARY_PATH=$CONDA_PREFIX/lib:/usr/lib/wsl/lib:$LD_LIBRARY_PATH \
-  python3 run_pycuvslam_rgbd.py \
-    --rgb-dir data/sample_20260117_205753/left \
-    --depth-dir data/sample_20260117_205753/left_depth \
-    --calibration data/sample_20260117_205753/left_calibration.yaml \
-    --timestamps data/sample_20260117_205753/timestamps.txt \
-    --depth-scale 1000 \
-    --enable-slam \
-    --undistort \
-    --distortion-model fisheye \
-    --preview \
-    --show-features
-
-
-## orbslam for rgbd 
-bash orbslam3_rgbd/run_orbslam3_rgbd.sh \
-    --rgb-dir data/sample_20260117_205753/left \
-    --depth-dir data/sample_20260117_205753/left_depth \
-    --calibration data/sample_20260117_205753/left_calibration.yaml \
-    --timestamps data/sample_20260117_205753/timestamps.txt \
-    --depth-scale 1000 \
-    --distortion-model fisheye \
-    --viewer
-
-
-## ORBSLAM will faild when fast rotation motion 
+## Individual runners
+See `pipelines/README.md` for per-step commands (`run_pycuvslam_rgbd.py`, `run_nvblox.py`, stereo variant, etc.).
