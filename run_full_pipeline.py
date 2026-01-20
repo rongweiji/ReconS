@@ -245,7 +245,7 @@ def main() -> int:
     m_per_unit = 1.0 / float(args.depth_scale) if float(args.depth_scale) != 0 else 0.001
     nvblox_cmd: list[str] = [
         sys.executable,
-        str(repo_root / "nvblox_ex" / "run_nvblox.py"),
+        str(repo_root / "pipelines" / "run_nvblox.py"),
         "--rgb-dir",
         str(rgb_dir),
         "--depth-dir",

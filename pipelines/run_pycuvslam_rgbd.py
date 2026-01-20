@@ -171,8 +171,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--depth-dir", required=True, type=Path, help="Folder containing depth images (e.g. left_depth).")
     parser.add_argument("--calibration", required=True, type=Path, help="Calibration YAML for the RGB camera.")
     parser.add_argument("--timestamps", required=True, type=Path, help="timestamps.txt with frame,timestamp_ns.")
-    parser.add_argument("--out", type=Path, default=Path("outputs/pycuvslam_rgbd/poses.tum"), help="Output TUM pose file.")
-    parser.add_argument("--slam-out", type=Path, default=Path("outputs/pycuvslam_rgbd/poses_slam.tum"), help="Output TUM pose file for SLAM (when enabled).")
+    parser.add_argument("--out", type=Path, default=None, help="Output TUM pose file (default: <rgb-dir>/cuvslam_poses.tum).")
+    parser.add_argument("--slam-out", type=Path, default=None, help="Output TUM pose file for SLAM (default: <rgb-dir>/cuvslam_poses_slam.tum).")
     parser.add_argument("--rgb-ext", default=".jpg", help="RGB image extension.")
     parser.add_argument("--depth-ext", default=".png", help="Depth image extension.")
     parser.add_argument("--depth-scale", type=float, default=1000.0, help="Depth scale factor (value per meter).")
@@ -196,6 +196,13 @@ def main() -> int:
     args = parse_args()
     rgb_ext = args.rgb_ext if args.rgb_ext.startswith(".") else f".{args.rgb_ext}"
     depth_ext = args.depth_ext if args.depth_ext.startswith(".") else f".{args.depth_ext}"
+
+    # Resolve default output paths relative to the RGB folder if not provided.
+    rgb_dir = args.rgb_dir
+    if args.out is None:
+        args.out = rgb_dir.parent / "cuvslam_poses.tum"
+    if args.slam_out is None:
+        args.slam_out = rgb_dir.parent / "cuvslam_poses_slam.tum"
 
     timestamps = read_timestamps(args.timestamps)
     if not timestamps:

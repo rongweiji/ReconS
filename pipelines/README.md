@@ -1,82 +1,46 @@
-## Phone sample converter
+## Pipelines
 
-This folder contains a small CLI to:
+Entry-point scripts that stitch together depth → PyCuVSLAM → nvblox for our RGBD datasets.
 
-1. Extract a phone video (e.g. `0001.mov`) into an image-frame folder.
-2. Read the corresponding `*_ar.csv` (100 Hz) and visualize time alignment vs the video (≈30 fps).
+Environments:
+- PyCuVSLAM: use the `pycuvslam` conda env (activates cuvslam).
+- nvblox: use the `.venv` with `nvblox_torch`, `torch`, `opencv-python`, `numpy` (UI uses `rerun-sdk`).
 
-### Usage
+Env setup (example):
+- PyCuVSLAM (conda): `conda env create -f environment.yml` (or activate your existing `pycuvslam`), then `conda activate pycuvslam`.
+- nvblox (.venv): `python3 -m venv .venv && . .venv/bin/activate && pip install -r ../requirements.txt` and install a CUDA-matched `torch` plus your `nvblox_torch` wheel. For UI: `pip install rerun-sdk`.
 
-Create a venv (recommended) and install dependencies:
+- `run_pycuvslam_rgbd.py`: run PyCuVSLAM on RGB + depth + calibration + timestamps. Outputs TUM poses to `<rgb-dir>/cuvslam_poses.tum` by default (SLAM poses to `<rgb-dir>/cuvslam_poses_slam.tum` when `--enable-slam`).
+- `run_nvblox.py`: feed RGB + depth + calibration + TUM poses + timestamps into `nvblox_torch` to produce a mesh and optional UI visualization.
+- `run_pycuvslam_stereo.py`: stereo variant for PyCuVSLAM (left/right + depths).
 
-```bash
-python3 -m venv .venv
-. .venv/bin/activate
-pip install -r ../requirements.txt
-```
-
-Run the converter (input is the folder containing the video + csv files):
-
-```bash
-. .venv/bin/activate
-python data_prepare.py data/phone_sample1
-```
-
-### Outputs (written inside the input folder)
-
-- `frames_<video_stem>/frame_000000.png` ... extracted frames
-- `frames_<video_stem>/video_frames.csv` ... per-frame timestamps (seconds since start)
-- `frames_<video_stem>/video_info.json` ... video timing summary
-- `alignment_<video_stem>.png` ... alignment visualization
-- `alignment_<video_stem>.json` ... alignment summary metrics
-
-## nvblox_torch Runner (generic RGBD)
-
-`run_nvblox.py` replays raw RGB + depth + poses into `nvblox_torch` and exports a reconstructed mesh.
-
-### Requirements
-
-- NVIDIA GPU + CUDA working inside WSL/Linux (the installed `nvblox_torch` wheel is CUDA-only).
-- Python deps in your venv:
-  - `nvblox_torch` (your CUDA/Ubuntu-matched wheel)
-  - `opencv-python`, `numpy`, `torch`
-  - Optional UI: `PySide6`, `pyqtgraph`, `PyOpenGL`
-
-### Basic usage (headless)
-
-Inputs: RGB frames, aligned depth frames, calibration YAML (K), TUM poses, timestamps.txt.
+### PyCuVSLAM RGBD (headless)
 
 ```bash
-python3 nvblox_ex/run_nvblox.py \
+python3 pipelines/run_pycuvslam_rgbd.py \
   --rgb-dir data/sample_20260119_i4/iphone_mono \
   --depth-dir data/sample_20260119_i4/iphone_mono_depth \
   --calibration data/sample_20260119_i4/iphone_calibration.yaml \
-  --poses data/sample_20260119_i4/pycuvslam_poses.tum \
+  --timestamps data/sample_20260119_i4/timestamps.txt \
+  --enable-slam
+```
+
+Defaults write poses to `data/sample_20260119_i4/cuvslam_poses.tum`. Also write `cuvslam_poses_slam.tum`.
+
+### nvblox (headless)
+
+```bash
+python3 pipelines/run_nvblox.py \
+  --rgb-dir data/sample_20260119_i4/iphone_mono \
+  --depth-dir data/sample_20260119_i4/iphone_mono_depth \
+  --calibration data/sample_20260119_i4/iphone_calibration.yaml \
+  --poses data/sample_20260119_i4/cuvslam_poses.tum \
   --timestamps data/sample_20260119_i4/timestamps.txt \
   --out_dir data/sample_20260119_i4/nvblox_out
 ```
 
-This writes `mesh.ply` into `--out_dir` (falls back to `mapper.get_color_mesh().save(...)` if the mapper lacks a direct export). Add `--ui` for the Qt viewer.
+Depth is assumed uint16 millimeters (`--depth_scale 0.001` by default). Add `--ui` for the Rerun viewer.
 
-### Key parameters
+### Full chain (depth → poses → nvblox)
 
-- `--rgb-dir`, `--depth-dir`: Frame folders (depth must align to RGB).
-- `--calibration`: YAML with K; intrinsics are built from it.
-- `--poses`: TUM pose file (timestamp tx ty tz qx qy qz qw).
-- `--timestamps`: CSV with frame,timestamp_ns.
-- `--out_dir`: Output folder for reconstructed artifacts (default: sibling `nvblox_out`).
-- `--voxel_size_m`: Voxel resolution (smaller = more detail, slower/more memory).
-- `--max_integration_distance_m`: Depth truncation / max integration distance.
-- `--depth_scale`: Meters per depth unit (uint16 millimeters → `0.001`).
-- `--mesh_every`: Update mesh every N frames (affects UI refresh cadence).
-- `--invert_pose`: Invert each pose before integration (use if your trajectory is `T_C_W` instead of `T_W_C`).
-- `--ui`: Show live Qt mesh viewer while integrating.
-- `--mode`: UI visualization mode: `colormesh`, `solidmesh`, `esdf`, `tsdf`, or `pointcloud` (ESDF/TSDF require nvblox_torch layer/query APIs).
-- `--pointcloud_stride`: Pointcloud mode pixel stride (larger = fewer points).
-- `--pointcloud_max_points`: Max points sent to the UI per frame.
-- `--field_step_m`: ESDF slice sampling step (smaller = higher resolution, slower).
-- `--voxel_band_m`: Voxel mode TSDF band (|tsdf| < band).
-- `--voxel_radius_m`: Voxel mode local radius around current pose.
-- `--voxel_max_points`: Voxel mode downsample cap for UI speed.
-- `--cube`: TSDF mode render voxels as cubes instead of points (slower).
-This script always exports `tsdf_voxel_grid.ply` and `occupancy_voxel_grid.ply` into `--out_dir`.
+Use the repo root `run_full_pipeline.py` to automate all steps; see its help for flags.

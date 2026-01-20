@@ -961,9 +961,27 @@ def main() -> int:
 
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    viewer: QtMeshViewer | None = QtMeshViewer() if args.ui else None
-    if viewer:
-        viewer.show()
+    rerun_enabled = False
+    rr = None  # type: ignore
+    if args.ui:
+        try:
+            import rerun as rr  # type: ignore
+            rerun_enabled = True
+            rr.init("nvblox", spawn=True)
+            rr.log("/", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
+            rr.log(
+                "world/camera",
+                rr.Pinhole(
+                    focal_length=[fx, fy],
+                    principal_point=[cx, cy],
+                    width=w,
+                    height=h,
+                ),
+            )
+        except Exception as exc:
+            raise RuntimeError("Requested --ui but failed to import/init rerun (pip install rerun-sdk).") from exc
+
+    viewer: QtMeshViewer | None = None  # Qt UI disabled; using rerun when --ui
     prev_pose: np.ndarray | None = None
     path_points: list[np.ndarray] = []
     recent_points: list[np.ndarray] = []
@@ -989,16 +1007,12 @@ def main() -> int:
         depth_path = depth_dir / f"{frame_id}{depth_ext}"
         if not rgb_path.exists() or not depth_path.exists():
             print(f"Skipping frame {frame_id}: missing {rgb_path if not rgb_path.exists() else depth_path}")
-            if viewer:
-                viewer.refresh()
             continue
 
         try:
             t, q = _lookup_pose(ts_sec, ts_sorted, traj_map, tol)
         except KeyError as exc:
             print(f"Skipping frame {frame_id} (t={ts_sec:.6f}): {exc}")
-            if viewer:
-                viewer.refresh()
             continue
 
         rgb = cv2.imread(str(rgb_path), cv2.IMREAD_COLOR)
@@ -1017,21 +1031,12 @@ def main() -> int:
         # nvblox_torch color expects RGB uint8 with 3 channels on GPU.
         rgb_uint8 = cv2.cvtColor(rgb, cv2.COLOR_BGR2RGB)
 
-        if viewer:
-            viewer.update_rgb_frame(rgb_uint8)
-            viewer.update_depth_frame(depth_m, max_depth_m=float(args.max_integration_distance_m))
-
         pose = _make_pose_matrix(t, q)
         if args.invert_pose:
             pose = np.linalg.inv(pose)
 
-        if viewer and viewer.light_pos is None:
-            viewer.set_light_position(pose[:3, 3])
-
         # Always skip frames with unchanged poses (common in phone logs during tracking stalls).
         if not _pose_changed(prev_pose, pose):
-            if viewer:
-                viewer.refresh()
             print(f"Skipped frame {frame_id} (t={ts_sec:.6f}) - static pose")
             continue
         prev_pose = pose
@@ -1074,29 +1079,27 @@ def main() -> int:
         mapper.add_color_frame(rgb_t, pose_t, intrinsics_t)
         dt_int_ms = (time.perf_counter() - t_int0) * 1000.0
 
-        if viewer:
-            viewer.update_pose_axes(pose)
+        if rerun_enabled:
+            rr.set_time("frame", sequence=idx)
+            rr.set_time("time", timestamp=ts_sec)
+            rr.log(
+                "world/camera_pose",
+                rr.Transform3D(
+                    translation=pose[:3, 3].tolist(),
+                    rotation=pose[:3, :3].tolist(),
+                ),
+            )
             if path_points:
-                viewer.update_path(np.vstack(path_points))
-            if args.mode == "pointcloud":
-                xyz, rgba = _depth_to_pointcloud(
-                    depth_m,
-                    intrinsics,
-                    rgb_uint8,
-                    stride=int(args.pointcloud_stride),
-                    max_depth_m=float(args.max_integration_distance_m),
-                    pose_w_c=pose,
-                )
-                if xyz.shape[0] > 0:
-                    xyz, rgba = _downsample_points(xyz, rgba, int(args.pointcloud_max_points))
-                viewer.update_field_points(xyz, rgba)
+                rr.log("world/path", rr.LineStrips3D([path_points]))
+            rr.log("world/rgb", rr.Image(rgb_uint8))
+            rr.log("world/depth", rr.DepthImage(depth_m.astype(np.float32), meter=1.0))
 
         if args.mesh_every > 0 and (idx % int(args.mesh_every) == 0):
             t0 = time.perf_counter()
             if args.mode in ("colormesh", "solidmesh"):
                 mapper.update_color_mesh()
                 mesh = mapper.get_color_mesh().to_open3d()
-                if viewer:
+                if rerun_enabled:
                     verts = np.asarray(mesh.vertices, dtype=np.float32)
                     faces = np.asarray(mesh.triangles, dtype=np.int32)
                     vcolors = None
@@ -1104,8 +1107,14 @@ def main() -> int:
                         vcolors = np.asarray(mesh.vertex_colors, dtype=np.float32)
                         if vcolors.max() > 1.0:
                             vcolors = vcolors / 255.0
-                    use_vcols = args.mode == "colormesh"
-                    viewer.update_mesh(verts, faces, vcolors, use_vertex_colors=use_vcols)
+                    rr.log(
+                        "world/mesh",
+                        rr.Mesh3D(
+                            vertex_positions=verts,
+                            triangle_indices=faces,
+                            vertex_colors=vcolors if mesh.has_vertex_colors() else None,
+                        ),
+                    )
             elif args.mode == "esdf":
                 mapper.update_esdf()
                 qtype = QueryType.ESDF
@@ -1126,15 +1135,6 @@ def main() -> int:
                     half_width_m=half_width_m,
                     step_m=step,
                 )
-                if viewer:
-                    viewer.update_slice_plane(
-                        origin,
-                        forward_hint,
-                        normal=last_plane_normal,
-                        ahead_m=ahead_m,
-                        behind_m=behind_m,
-                        half_width_m=half_width_m,
-                    )
                 if query_xyz.shape[0] > 0:
                     query_t = torch.from_numpy(query_xyz).to(device=device, dtype=torch.float32)
                     sdf = mapper.query_differentiable_layer(qtype, query_t).detach()
@@ -1147,11 +1147,11 @@ def main() -> int:
                     xyz_vis = query_xyz[valid]
 
                     rgba = np.concatenate([colors_rgb, np.ones((colors_rgb.shape[0], 1), dtype=np.float32)], axis=1)
-                    if viewer:
+                    if rerun_enabled:
                         xyz_vis, rgba = _downsample_points(
                             xyz_vis.astype(np.float32), rgba.astype(np.float32), int(args.voxel_max_points)
                         )
-                        viewer.update_field_points(xyz_vis.astype(np.float32), rgba.astype(np.float32))
+                        rr.log("world/esdf_points", rr.Points3D(positions=xyz_vis, colors=rgba))
             elif args.mode == "tsdf":
                 # Voxel mode: visualize a local band of TSDF voxels near the surface.
                 tsdf_layer = mapper.tsdf_layer_view()
@@ -1235,23 +1235,29 @@ def main() -> int:
                     xyz = xyz_t.detach().cpu().numpy().astype(np.float32)
                     rgba = rgba_t.detach().cpu().numpy().astype(np.float32)
                     xyz, rgba = _downsample_points(xyz, rgba, int(args.voxel_max_points))
-                    if args.cube:
-                        voxel_size = float(tsdf_layer.voxel_size())
-                        verts, faces, vcolors = _build_cube_mesh(xyz, voxel_size, rgba)
-                        viewer.update_mesh(verts, faces, vcolors, use_vertex_colors=True)
-                    else:
-                        viewer.update_field_points(xyz, rgba)
+                    if rerun_enabled:
+                        if args.cube:
+                            voxel_size = float(tsdf_layer.voxel_size())
+                            verts, faces, vcolors = _build_cube_mesh(xyz, voxel_size, rgba)
+                            rr.log(
+                                "world/tsdf_mesh",
+                                rr.Mesh3D(
+                                    vertex_positions=verts,
+                                    triangle_indices=faces,
+                                    vertex_colors=vcolors,
+                                ),
+                            )
+                        else:
+                            rr.log("world/tsdf_points", rr.Points3D(positions=xyz, colors=rgba))
             dt_mesh = (time.perf_counter() - t0) * 1000.0
             print(f"Integrated frame {frame_id} (t={ts_sec:.6f}) - integ {dt_int_ms:.1f} ms, vis {dt_mesh:.1f} ms")
         else:
-            if viewer:
-                viewer.process_events()
             print(f"Integrated frame {frame_id} (t={ts_sec:.6f}) - integ {dt_int_ms:.1f} ms")
 
     # Final mesh update and export if available.
     mapper.update_color_mesh()
     final_mesh = mapper.get_color_mesh().to_open3d()
-    if viewer and args.mode in ("colormesh", "solidmesh"):
+    if rerun_enabled and args.mode in ("colormesh", "solidmesh"):
         verts = np.asarray(final_mesh.vertices, dtype=np.float32)
         faces = np.asarray(final_mesh.triangles, dtype=np.int32)
         vcolors = None
@@ -1259,11 +1265,14 @@ def main() -> int:
             vcolors = np.asarray(final_mesh.vertex_colors, dtype=np.float32)
             if vcolors.max() > 1.0:
                 vcolors = vcolors / 255.0
-        use_vcols = args.mode == "colormesh"
-        viewer.update_mesh(verts, faces, vcolors, use_vertex_colors=use_vcols)
-        viewer.update_pose_axes(np.eye(4, dtype=np.float32))
-        if path_points:
-            viewer.update_path(np.vstack(path_points))
+        rr.log(
+            "world/mesh_final",
+            rr.Mesh3D(
+                vertex_positions=verts,
+                triangle_indices=faces,
+                vertex_colors=vcolors if final_mesh.has_vertex_colors() else None,
+            ),
+        )
 
     # Export: API name differs across versions. Try mapper methods first, then fall back to ColorMesh.save.
     out_mesh = out_dir / "mesh.ply"
@@ -1308,10 +1317,6 @@ def main() -> int:
     )
     if did_export_occ:
         print(f"Wrote voxel grid: {out_occ}")
-
-    if viewer:
-        print("Live viewer running; close the window to exit.")
-        return viewer.exec()
 
     return 0
 
