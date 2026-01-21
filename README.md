@@ -5,7 +5,9 @@ End-to-end RGBD pipeline: depth → PyCuVSLAM → nvblox.
 Demo : 
 
 
-https://github.com/user-attachments/assets/2a8dde98-21bd-4a51-9bf5-f72f4e7369b6
+
+https://github.com/user-attachments/assets/c316bae7-069f-442d-bf2f-6c98325dd0ef
+
 
 
 
