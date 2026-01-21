@@ -13,6 +13,7 @@ Env setup (example):
 - `run_pycuvslam_rgbd.py`: run PyCuVSLAM on RGB + depth + calibration + timestamps. Outputs TUM poses to `<rgb-dir>/cuvslam_poses.tum` by default (SLAM poses to `<rgb-dir>/cuvslam_poses_slam.tum` when `--enable-slam`).
 - `run_nvblox.py`: feed RGB + depth + calibration + TUM poses + timestamps into `nvblox_torch` to produce a mesh and optional UI visualization.
 - `run_pycuvslam_stereo.py`: stereo variant for PyCuVSLAM (left/right + depths).
+- `run_nvblox_sfm.py`: fuse cuSFM keyframes (frames_meta.json) + RGB + depth directly into nvblox_torch using refined SfM poses, with rerun UI.
 
 ### PyCuVSLAM RGBD 
 
@@ -43,6 +44,19 @@ python3 pipelines/run_nvblox.py \
 ```
 
 Depth is assumed uint16 millimeters (`--depth_scale 0.001` by default). 
+
+### nvblox (cuSFM keyframes only)
+
+```
+python3 pipelines/run_nvblox_sfm.py \
+  --frames-meta data/sample_20260119_i4/cusfm_output/keyframes/frames_meta.json \
+  --rgb-dir data/sample_20260119_i4/iphone_mono \
+  --depth-dir data/sample_20260119_i4/iphone_mono_depth \
+  --calibration data/sample_20260119_i4/iphone_calibration.yaml \
+  --out-dir data/sample_20260119_i4/nvblox_sfm_out
+```
+
+Uses refined poses from `frames_meta.json` and logs RGB/depth/mesh to rerun by default. Depth is assumed uint16 millimeters unless `--depth-scale` is set otherwise (`--no-ui` disables rerun).
 ### Full chain (depth → poses → nvblox)
 
 Use the repo root `run_full_pipeline.py` to automate all steps; see its help for flags.
