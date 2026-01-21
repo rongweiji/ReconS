@@ -2,6 +2,14 @@
 
 End-to-end RGBD pipeline: depth → PyCuVSLAM → nvblox.
 
+Demo : 
+
+
+https://github.com/user-attachments/assets/2a8dde98-21bd-4a51-9bf5-f72f4e7369b6
+
+
+
+
 References:
 - nvblox: https://nvidia-isaac.github.io/nvblox/index.html
 - Neural reconstruction stereo (NuRec): https://docs.nvidia.com/nurec/robotics/neural_reconstruction_stereo.html
