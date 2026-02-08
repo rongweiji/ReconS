@@ -60,3 +60,50 @@ Uses refined poses from `frames_meta.json` and logs RGB/depth/mesh to rerun by d
 ### Full chain (depth → poses → nvblox)
 
 Use the repo root `run_full_pipeline.py` to automate all steps; see its help for flags.
+
+### 3dgrut (cuSFM + nvblox init)
+
+Use `run_3dgrut.py` to:
+- prepare a COLMAP-style 3dgrut dataset layout from a ReconS sample
+- run `third_party/3dgrut/train.py` with `apps/cusfm_3dgut.yaml`
+- save outputs under the same sample folder
+
+Preparation only (safe first check):
+
+```bash
+python3 pipelines/run_3dgrut.py \
+  --sample-dir data/sample_20260119_i4 \
+  --prepare-only \
+  --overwrite
+```
+
+Run training in the dedicated `3dgrut` conda env:
+
+```bash
+python3 pipelines/run_3dgrut.py \
+  --sample-dir data/sample_20260119_i4 \
+  --conda-env 3dgrut \
+  --max-steps 3000 \
+  --overwrite
+```
+
+Run with separate folders (without `--sample-dir`):
+
+```bash
+python3 pipelines/run_3dgrut.py \
+  --images-dir data/sample_20260119_i4/iphone_mono \
+  --sparse-dir data/sample_20260119_i4/cusfm_output/sparse \
+  --fused-point-cloud data/sample_20260119_i4/nvblox_sfm_out/nvblox_mesh.ply \
+  --work-dir /tmp/recons_i4_3dgrut_data \
+  --out-dir data/sample_20260119_i4/3dgrut_out \
+  --conda-env 3dgrut \
+  --max-steps 3000 \
+  --overwrite
+```
+
+By default this script:
+- uses `data/sample_20260119_i4/cusfm_output/sparse` as COLMAP sparse input
+- uses `data/sample_20260119_i4/nvblox_sfm_out/nvblox_mesh.ply` as fused point cloud init
+- writes prepared data to `<sample>/3dgrut_data`
+- writes training outputs to `<sample>/3dgrut_out`
+- writes run metadata to `<sample>/3dgrut_manifest.json` and `<sample>/3dgrut_result.json`
