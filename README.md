@@ -1,6 +1,6 @@
 # ReconS
 
-End-to-end RGBD pipeline: depth → PyCuVSLAM → nvblox.
+End-to-end pipeline: RGB-> depth → PyCuVSLAM ->SFM → nvblox -> 3D synthesis and visualization
 
 Demo : 
 
@@ -18,17 +18,49 @@ References:
 - Depth generation (Depth Anything TRT): https://github.com/ika-rwth-aachen/ros2-depth-anything-v3-trt
 
 ## Environment
-- Use the `pycuvslam` conda env (has `cuvslam`). Install the rest into the same env:
+Use two conda environments:
+- `pycuvslam`: depth + PyCuVSLAM + cuSFM + nvblox pipeline (this repo's current one-shot flow).
+- `3dgrut`: NURec Step 5 neural reconstruction and USD/USDZ export.
+
+Why two envs:
+- `cuvslam` is pinned to Python `3.10.*`.
+- `3dgrut` uses a different Python/Torch/CUDA stack (its installer creates a dedicated env).
+- Mixing both stacks in one env is likely to cause dependency conflicts.
+
+### 1) Setup `pycuvslam` (ReconS pipeline)
+```bash
+conda create -n pycuvslam python=3.10 -y
+conda activate pycuvslam
+python -m pip install --upgrade pip
+python -m pip install ./third_party/PyCuVSLAM/bin/x86_64
+python -m pip install ./third_party/pyCuSFM
+python -m pip install "torch==<cu12x build>" -f https://download.pytorch.org/whl/torch_stable.html
+python -m pip install <nvblox_torch_wheel>  # matching CUDA build
+python -m pip install -r requirements.txt rerun-sdk open3d
+```
+Replace `<cu12x build>` and `<nvblox_torch_wheel>` with CUDA-matched builds.
+
+### 2) Setup `3dgrut` (NURec Step 5)
+```bash
+git clone --recursive https://github.com/nv-tlabs/3dgrut.git third_party/3dgrut
+cd third_party/3dgrut
+./install_env.sh 3dgrut
+conda activate 3dgrut
+```
+`install_env.sh` supports CUDA `11.8.0` and `12.8.1` via `CUDA_VERSION`.
+
+### 3) Which env to use when
+- Run ReconS scripts (`run_full_pipeline.py`, `pipelines/run_pycuvslam_*.py`, `pipelines/run_nvblox*.py`) in `pycuvslam`.
+- Run `3dgrut` training/export in `3dgrut`.
+
+### 4) Runtime notes
+- NVIDIA driver: PyCuVSLAM requires a driver exposing CUDA >= 12.6 (R560+; CUDA 13 drivers are OK).
+- On WSL, keep:
   ```bash
-  conda activate pycuvslam
-  python -m pip install "torch==<cu12x build>" -f https://download.pytorch.org/whl/torch_stable.html
-  python -m pip install <nvblox_torch_wheel>  # matching CUDA build
-  python -m pip install rerun-sdk opencv-python numpy
+  export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:/usr/lib/wsl/lib:$LD_LIBRARY_PATH
   ```
-  Replace `<cu12x build>` and wheel path with the CUDA build you have (cu12 wheels run on CUDA 13 drivers).
-- NVIDIA driver: PyCuVSLAM requires a driver exposing CUDA ≥12.6 (R560+; CUDA 13 is OK). Check with `nvidia-smi`.
-- On WSL add GUI libs if needed and keep `LD_LIBRARY_PATH=$CONDA_PREFIX/lib:/usr/lib/wsl/lib:$LD_LIBRARY_PATH` so cuvslam loads the WSL libcuda shim instead of older toolkit stubs.
-- If `conda` is missing after install, run `~/miniconda3/bin/conda init bash`, then `source ~/.bashrc` (or reopen a shell) so `conda` is on your PATH.
+  so `cuvslam` resolves the correct CUDA/libpython libraries.
+- If `conda` is missing after install, run `~/miniconda3/bin/conda init bash`, then `source ~/.bashrc` (or reopen a shell).
 
 ## Data layout (per sample)
 ```

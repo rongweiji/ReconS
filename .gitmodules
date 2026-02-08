@@ -10,3 +10,6 @@
 [submodule "third_party/ORB_SLAM3"]
 	path = third_party/ORB_SLAM3
 	url = https://github.com/UZ-SLAMLab/ORB_SLAM3.git
+[submodule "third_party/3dgrut"]
+	path = third_party/3dgrut
+	url = https://github.com/nv-tlabs/3dgrut.git
