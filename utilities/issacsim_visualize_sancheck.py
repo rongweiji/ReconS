@@ -7,7 +7,7 @@ This script:
 3. Creates a combined stage with both assets
 
 Usage in Isaac Sim Script Editor:
-    exec(open("G:/GithubProject/ReconS/utilities/gs_mesh.py").read())
+    exec(open("G:/GithubProject/ReconS/utilities/issacsim_visualize_sancheck.py").read())
 """
 
 import os
