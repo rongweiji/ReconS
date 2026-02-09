@@ -71,22 +71,46 @@ data/sample_xxx/
   timestamps.txt           # frame,timestamp_ns
 ```
 
-Outputs land alongside the sample (or next to your provided RGB folder):
-- `cuvslam_poses.tum` and `cuvslam_poses_slam.tum` (SLAM enabled by default)
-- `nvblox_out/mesh.ply` (+ voxel exports)
-- depth folder is regenerated if missing.
+Outputs land alongside the sample:
+- `iphone_mono_depth/` - generated depth maps
+- `pycuvslam_poses.tum`, `pycuvslam_poses_slam.tum` - trajectories
+- `nvblox_out/` - mesh from all frames
+- `cusfm_output/` - sparse reconstruction + `keyframes/`
+- `nvblox_sfm_out/` - refined mesh from SFM keyframes
 
-## One-shot pipeline
+## Full Pipeline
+
+`run_full_pipeline.py` executes 6 steps end-to-end:
+
+1. **Depth** - Generate depth maps via Depth Anything TensorRT
+2. **PyCuVSLAM** - Visual odometry + SLAM poses
+3. **Dataset prep** - Build nvblox artifacts (associations, trajectory CSV, intrinsics)
+4. **nvblox** - Dense mesh from all frames
+5. **cuSFM** - Sparse reconstruction with keyframe selection
+6. **nvblox-sfm** - Refined mesh from SFM keyframes (cleaner for 3dgrut)
+
 ```bash
+# Using dataset folder (recommended)
+python3 run_full_pipeline.py --dataset data/sample_20260208_i1
+
+# Or explicit paths
 python3 run_full_pipeline.py \
-  --rgb-dir data/sample_20260119_i4/iphone_mono \
-  --calibration data/sample_20260119_i4/iphone_calibration.yaml \
-  --timestamps data/sample_20260119_i4/timestamps.txt \
-  --nvblox-mode colormesh \
-  --nvblox-ui   # drop if headless
+  --rgb-dir data/sample_xxx/iphone_mono \
+  --calibration data/sample_xxx/iphone_calibration.yaml \
+  --timestamps data/sample_xxx/timestamps.txt
 ```
-This runs depth generation, PyCuVSLAM, builds nvblox artifacts, and runs nvblox with Rerun UI when `--nvblox-ui` is set. You can still pass `--dataset <folder>` to use the default filenames (`iphone_mono`, `iphone_calibration.yaml`, `timestamps.txt`), but `--dataset` is optional—any folder names work when you provide the three paths.
-SLAM runs by default: both odometry (`pycuvslam_poses.tum`) and SLAM (`pycuvslam_poses_slam.tum`, `CameraTrajectory_slam.csv`) are saved, and nvblox consumes the SLAM trajectory unless you pass `--use-odom-poses` (or disable SLAM with `--disable-slam`).
+
+**Outputs** (in dataset folder):
+- `iphone_mono_depth/` - depth maps
+- `pycuvslam_poses.tum`, `pycuvslam_poses_slam.tum` - trajectories
+- `nvblox_out/` - mesh from all frames
+- `cusfm_output/` - sparse reconstruction + keyframes
+- `nvblox_sfm_out/nvblox_mesh.ply` - refined mesh for 3dgrut
+
+**Options:**
+- `--skip-cusfm` / `--skip-nvblox-sfm` - skip SFM steps
+- `--disable-slam` - use odometry only
+- `--nvblox-ui` / `--nvblox-sfm-ui` - show visualization
 
 ## Individual runners
 See `pipelines/README.md` for per-step commands (`run_pycuvslam_rgbd.py`, `run_nvblox.py`, stereo variant, etc.).

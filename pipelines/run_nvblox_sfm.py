@@ -204,6 +204,46 @@ def _load_frames(frames_meta_path: Path, rgb_dir: Path, depth_dir: Path) -> list
     return frames
 
 
+def _read_tum_trajectory(path: Path) -> dict[float, tuple[np.ndarray, np.ndarray]]:
+    """Return mapping timestamp -> (t_xyz, q_xyzw) from a TUM file."""
+    out: dict[float, tuple[np.ndarray, np.ndarray]] = {}
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split()
+        if len(parts) != 8:
+            continue
+        ts = float(parts[0])
+        tx, ty, tz = map(float, parts[1:4])
+        qx, qy, qz, qw = map(float, parts[4:8])
+        out[ts] = (
+            np.array([tx, ty, tz], dtype=np.float32),
+            np.array([qx, qy, qz, qw], dtype=np.float32),
+        )
+    return out
+
+
+def _quat_xyzw_to_rotmat(q: np.ndarray) -> np.ndarray:
+    """Convert quaternion (x,y,z,w) to 3x3 rotation matrix."""
+    x, y, z, w = (float(q[0]), float(q[1]), float(q[2]), float(q[3]))
+    n = x * x + y * y + z * z + w * w
+    if n < 1e-12:
+        return np.eye(3, dtype=np.float32)
+    s = 2.0 / n
+    xx, yy, zz = x * x * s, y * y * s, z * z * s
+    xy, xz, yz = x * y * s, x * z * s, y * z * s
+    wx, wy, wz = w * x * s, w * y * s, w * z * s
+    return np.array(
+        [
+            [1.0 - (yy + zz), xy - wz, xz + wy],
+            [xy + wz, 1.0 - (xx + zz), yz - wx],
+            [xz - wy, yz + wx, 1.0 - (xx + yy)],
+        ],
+        dtype=np.float32,
+    )
+
+
 def _rr_set_time(rr, frame_idx: int, ts_sec: float) -> None:
     if hasattr(rr, "set_time"):
         rr.set_time("frame", sequence=frame_idx)
@@ -229,6 +269,7 @@ def main() -> int:
     parser.add_argument("--mesh-path", type=Path, help="PLY output path (default: <out-dir>/nvblox_mesh.ply).")
     parser.add_argument("--invert-pose", action="store_true", help="Invert poses if frames_meta stores T_C_W instead of T_W_C.")
     parser.add_argument("--max-frames", type=int, default=0, help="Optional cap on frames to fuse (0 = all).")
+    parser.add_argument("--poses-compare", type=Path, help="Optional TUM pose file for comparison trajectory (e.g., SLAM vs SFM).")
     parser.add_argument("--no-ui", dest="ui", action="store_false", help="Disable rerun UI logging.")
     parser.set_defaults(ui=True)
     args = parser.parse_args()
@@ -305,8 +346,16 @@ def main() -> int:
             raise RuntimeError("Requested UI but failed to init rerun (pip install rerun-sdk).") from exc
 
     path_points: list[np.ndarray] = []
+    path_points_compare: list[np.ndarray] = []  # comparison trajectory (e.g., SLAM)
     start_time = time.perf_counter()
     max_frames = int(args.max_frames) if int(args.max_frames) > 0 else len(frames)
+
+    # Load comparison trajectory if provided
+    traj_compare = None
+    if args.poses_compare and args.poses_compare.exists():
+        traj_compare = _read_tum_trajectory(args.poses_compare.expanduser().resolve())
+        ts_sorted_compare = np.array(sorted(traj_compare.keys()), dtype=np.float64)
+        print(f"[info] Loaded comparison trajectory with {len(traj_compare)} poses")
 
     for idx, frame in enumerate(frames[:max_frames]):
         rgb = cv2.imread(str(frame.rgb_path), cv2.IMREAD_COLOR)
@@ -342,6 +391,27 @@ def main() -> int:
 
         path_points.append(pose[:3, 3].copy())
 
+        # Build comparison path if available
+        if traj_compare is not None:
+            # Find nearest pose in comparison trajectory
+            idx_cmp = np.searchsorted(ts_sorted_compare, frame.ts_sec)
+            candidates = []
+            if idx_cmp > 0:
+                candidates.append(ts_sorted_compare[idx_cmp - 1])
+            if idx_cmp < len(ts_sorted_compare):
+                candidates.append(ts_sorted_compare[idx_cmp])
+            if candidates:
+                nearest_ts = min(candidates, key=lambda t: abs(t - frame.ts_sec))
+                if abs(nearest_ts - frame.ts_sec) < 0.1:  # within 100ms tolerance
+                    t_cmp, q_cmp = traj_compare[float(nearest_ts)]
+                    rot_cmp = _quat_xyzw_to_rotmat(q_cmp)
+                    pose_cmp = np.eye(4, dtype=np.float32)
+                    pose_cmp[:3, :3] = rot_cmp
+                    pose_cmp[:3, 3] = t_cmp
+                    if args.invert_pose:
+                        pose_cmp = np.linalg.inv(pose_cmp)
+                    path_points_compare.append(pose_cmp[:3, 3].copy())
+
         if rerun_enabled:
             _rr_set_time(rr, idx, frame.ts_sec)
             rr.log(
@@ -349,7 +419,9 @@ def main() -> int:
                 rr.Transform3D(translation=pose[:3, 3].tolist(), rotation=pose[:3, :3].tolist()),
             )
             if path_points:
-                rr.log("world/path", rr.LineStrips3D([path_points]))
+                rr.log("world/path_sfm", rr.LineStrips3D([path_points], colors=[[0, 255, 0]]))  # green = SFM refined
+            if path_points_compare:
+                rr.log("world/path_slam", rr.LineStrips3D([path_points_compare], colors=[[255, 128, 0]]))  # orange = SLAM/compare
             rr.log("world/rgb", rr.Image(rgb_uint8))
             rr.log("world/depth", rr.DepthImage(depth_m.astype(np.float32), meter=1.0))
 

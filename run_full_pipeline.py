@@ -5,6 +5,8 @@ End-to-end pipeline:
 2) Run PyCuVSLAM RGBD to produce poses.tum.
 3) Build nvblox dataset artifacts (associations.txt, CameraTrajectory.csv, intrinsics JSON).
 4) Run nvblox mapper to export a mesh.
+5) Run cuSFM sparse reconstruction (skip with --skip-cusfm).
+6) Run nvblox with SFM keyframes for refined mesh (skip with --skip-nvblox-sfm).
 
 Inputs: point to RGB frames, calibration YAML, and timestamps.txt. You can still
 pass --dataset to use its default layout, but --dataset is no longer required.
@@ -18,6 +20,9 @@ Outputs (default locations inside --dataset or parent of --rgb-dir):
   - associations.txt              RGB/depth pairing for nvblox
   - intrinsics_auto.json          Intrinsics matching the RGB resolution
   - nvblox_out/                   Mesh/voxel exports from nvblox
+  - cusfm_output/                 [Optional] cuSFM sparse reconstruction
+  - frames_meta_cusfm.json        [Optional] cuSFM frames metadata
+  - nvblox_sfm_out/               [Optional] nvblox mesh from SFM keyframes
 """
 
 from __future__ import annotations
@@ -188,10 +193,62 @@ def _env_with_conda_lib(env: Mapping[str, str]) -> dict[str, str]:
     return merged
 
 
+def _env_with_cusfm_libs(env: Mapping[str, str], repo_root: Path) -> dict[str, str]:
+    """Ensure cuSFM native deps see correct CUDA/conda libs (prefer WSL shim + CUDA13)."""
+    merged = dict(env)
+    ld_parts: list[str] = []
+
+    wsl_lib = Path("/usr/lib/wsl/lib")
+    if wsl_lib.is_dir():
+        ld_parts.append(str(wsl_lib))
+
+    # Add pyCuSFM bundled libraries (libcvcuda, etc.)
+    pycusfm_lib = repo_root / "third_party" / "pyCuSFM" / "pycusfm" / "lib"
+    if pycusfm_lib.is_dir():
+        ld_parts.append(str(pycusfm_lib))
+
+    conda_prefix = merged.get("CONDA_PREFIX")
+    if conda_prefix:
+        ld_parts.append(str(Path(conda_prefix) / "lib"))
+
+    def _add_cuda_paths(*bases: Path) -> None:
+        for base in bases:
+            for sub in ("targets/x86_64-linux/lib", "lib64", "lib"):
+                candidate = base / sub
+                if candidate.is_dir():
+                    ld_parts.append(str(candidate))
+
+    # Force CUDA 13.0 first (matches driver), then allow 13.1/generic if 13.0 missing.
+    cuda_13 = Path("/usr/local/cuda-13.0")
+    cuda_131 = Path("/usr/local/cuda-13.1")
+    cuda_generic = Path("/usr/local/cuda")
+    if cuda_13.exists():
+        _add_cuda_paths(cuda_13)
+    elif cuda_131.exists():
+        _add_cuda_paths(cuda_131)
+    elif cuda_generic.exists():
+        _add_cuda_paths(cuda_generic)
+
+    if merged.get("LD_LIBRARY_PATH"):
+        current = []
+        for p in merged["LD_LIBRARY_PATH"].split(":"):
+            if not p:
+                continue
+            # Drop older /usr/local/cuda-* entries to avoid picking stale compat stubs.
+            if p.startswith("/usr/local/cuda") and "cuda-13" not in p:
+                continue
+            current.append(p)
+        ld_parts.extend(current)
+
+    if ld_parts:
+        merged["LD_LIBRARY_PATH"] = ":".join(ld_parts)
+    return merged
+
+
 def main() -> int:
     repo_root = Path(__file__).resolve().parent
 
-    parser = argparse.ArgumentParser(description="End-to-end: depth -> PyCuVSLAM -> nvblox.")
+    parser = argparse.ArgumentParser(description="End-to-end: depth -> PyCuVSLAM -> nvblox -> [cuSFM] -> [nvblox-sfm].")
     parser.add_argument(
         "--dataset",
         type=Path,
@@ -210,6 +267,14 @@ def main() -> int:
     parser.add_argument("--nvblox-ui", action="store_true", help="Show nvblox Qt UI.")
     parser.add_argument("--nvblox-out", type=Path, help="Output folder for nvblox (default: <base>/nvblox_out)")
     parser.add_argument("--skip-nvblox", action="store_true", help="Run depth + poses + dataset prep, skip nvblox.")
+    # cuSFM options (enabled by default)
+    parser.add_argument("--skip-cusfm", action="store_true", help="Skip cuSFM sparse reconstruction.")
+    parser.add_argument("--cusfm-out", type=Path, help="Output folder for cuSFM (default: <base>/cusfm_output)")
+    parser.add_argument("--frames-meta-out", type=Path, help="frames_meta.json output for cuSFM (default: <base>/frames_meta_cusfm.json)")
+    # nvblox-sfm options (enabled by default)
+    parser.add_argument("--skip-nvblox-sfm", action="store_true", help="Skip nvblox with SFM keyframes for refined mesh.")
+    parser.add_argument("--nvblox-sfm-out", type=Path, help="Output folder for nvblox-sfm (default: <base>/nvblox_sfm_out)")
+    parser.add_argument("--nvblox-sfm-ui", action="store_true", help="Show rerun UI for nvblox-sfm.")
     args = parser.parse_args()
 
     # Defaults: run SLAM and feed SLAM poses to downstream unless explicitly disabled.
@@ -319,9 +384,88 @@ def main() -> int:
     ]
     if args.nvblox_ui:
         nvblox_cmd.append("--ui")
+        # Pass both trajectories for comparison visualization (SLAM vs odometry)
+        if args.use_slam_poses and tum_out.exists():
+            nvblox_cmd.extend(["--poses-compare", str(tum_out)])
+        elif not args.use_slam_poses and slam_tum_out.exists():
+            nvblox_cmd.extend(["--poses-compare", str(slam_tum_out)])
     _run(nvblox_cmd, env=base_env)
 
-    print("Done.")
+    # Step 5: cuSFM sparse reconstruction (enabled by default)
+    cusfm_out = (args.cusfm_out or base_dir / "cusfm_output").expanduser().resolve()
+    frames_meta_path = (args.frames_meta_out or base_dir / "frames_meta_cusfm.json").expanduser().resolve()
+    run_cusfm = not args.skip_cusfm
+
+    if run_cusfm:
+        print("\n" + "=" * 60)
+        print("Step 5: cuSFM sparse reconstruction")
+        print("=" * 60)
+
+        cusfm_cmd = [
+            sys.executable,
+            str(repo_root / "pipelines" / "run_pycusfm.py"),
+            "--rgb-dir",
+            str(rgb_dir),
+            "--calibration",
+            str(calib_path),
+            "--timestamps",
+            str(ts_path),
+            "--poses",
+            str(poses_for_nvblox),
+            "--out-dir",
+            str(cusfm_out),
+            "--frames-meta-out",
+            str(frames_meta_path),
+        ]
+        cusfm_env = _env_with_cusfm_libs(os.environ, repo_root)
+        _run(cusfm_cmd, env=cusfm_env)
+
+    # Step 6: nvblox with SFM keyframes (enabled by default)
+    nvblox_sfm_out = (args.nvblox_sfm_out or base_dir / "nvblox_sfm_out").expanduser().resolve()
+    run_nvblox_sfm = not args.skip_nvblox_sfm
+
+    if run_nvblox_sfm:
+        if not run_cusfm:
+            print("[warning] nvblox-sfm requires cuSFM (don't use --skip-cusfm); skipping nvblox-sfm.")
+        else:
+            print("\n" + "=" * 60)
+            print("Step 6: nvblox with SFM keyframes")
+            print("=" * 60)
+
+            # Find the cuSFM keyframes frames_meta.json
+            cusfm_keyframes_meta = cusfm_out / "keyframes" / "frames_meta.json"
+            if not cusfm_keyframes_meta.exists():
+                print(f"[warning] cuSFM keyframes not found at {cusfm_keyframes_meta}; skipping nvblox-sfm.")
+            else:
+                nvblox_sfm_cmd = [
+                    sys.executable,
+                    str(repo_root / "pipelines" / "run_nvblox_sfm.py"),
+                    "--frames-meta",
+                    str(cusfm_keyframes_meta),
+                    "--rgb-dir",
+                    str(rgb_dir),
+                    "--depth-dir",
+                    str(depth_dir),
+                    "--calibration",
+                    str(calib_path),
+                    "--depth-scale",
+                    str(1.0 / args.depth_scale),
+                    "--mesh-path",
+                    str(nvblox_sfm_out / "nvblox_mesh.ply"),
+                ]
+                if args.nvblox_sfm_ui:
+                    # UI is enabled by default in run_nvblox_sfm.py
+                    # Pass SLAM/odometry trajectory for comparison with SFM poses
+                    if poses_for_nvblox.exists():
+                        nvblox_sfm_cmd.extend(["--poses-compare", str(poses_for_nvblox)])
+                else:
+                    nvblox_sfm_cmd.append("--no-ui")
+                _run(nvblox_sfm_cmd, env=base_env)
+
+    # Summary
+    print("\n" + "=" * 60)
+    print("Pipeline Complete")
+    print("=" * 60)
     print(f"Depth dir: {depth_dir}")
     print(f"PyCuVSLAM poses: {tum_out}")
     if args.enable_slam:
@@ -332,6 +476,11 @@ def main() -> int:
     poses_label = "SLAM" if args.use_slam_poses else "odometry"
     print(f"Nvblox poses source ({poses_label}): {poses_for_nvblox}")
     print(f"Nvblox outputs: {nvblox_out}")
+    if run_cusfm:
+        print(f"cuSFM outputs: {cusfm_out}")
+        print(f"cuSFM frames_meta: {frames_meta_path}")
+    if run_nvblox_sfm and run_cusfm:
+        print(f"nvblox-sfm outputs: {nvblox_sfm_out}")
     return 0
 
 

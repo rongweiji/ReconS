@@ -838,6 +838,7 @@ def main() -> int:
     parser.add_argument("--depth-dir", type=Path, required=True, help="Depth frames folder aligned to RGB")
     parser.add_argument("--calibration", type=Path, required=True, help="Calibration YAML with K matrix")
     parser.add_argument("--poses", type=Path, required=True, help="TUM pose file (timestamp tx ty tz qx qy qz qw)")
+    parser.add_argument("--poses-compare", type=Path, help="Optional second TUM pose file to visualize for comparison (e.g., odometry vs SLAM)")
     parser.add_argument("--timestamps", type=Path, required=True, help="timestamps.txt with frame,timestamp_ns")
     parser.add_argument("--voxel_size_m", type=float, default=0.03)
     parser.add_argument("--max_integration_distance_m", type=float, default=5.0)
@@ -929,6 +930,14 @@ def main() -> int:
     traj = _read_tum_trajectory(poses_path)
     ts_sorted, traj_map = _build_pose_lookup(traj)
 
+    # Optional comparison trajectory (e.g., odometry vs SLAM)
+    traj_compare = None
+    ts_sorted_compare = None
+    traj_map_compare = None
+    if args.poses_compare and args.poses_compare.exists():
+        traj_compare = _read_tum_trajectory(args.poses_compare.expanduser().resolve())
+        ts_sorted_compare, traj_map_compare = _build_pose_lookup(traj_compare)
+
     if not torch.cuda.is_available():
         raise RuntimeError("nvblox_torch requires a CUDA-capable GPU. torch.cuda.is_available() is False.")
     device = torch.device("cuda")
@@ -996,6 +1005,7 @@ def main() -> int:
     viewer: QtMeshViewer | None = None  # Qt UI disabled; using rerun when --ui
     prev_pose: np.ndarray | None = None
     path_points: list[np.ndarray] = []
+    path_points_compare: list[np.ndarray] = []  # comparison trajectory (e.g., odometry)
     recent_points: list[np.ndarray] = []
     last_plane_normal = np.array([0.0, 0.0, 1.0], dtype=np.float32)
     last_forward_on_plane = np.array([1.0, 0.0, 0.0], dtype=np.float32)
@@ -1054,6 +1064,17 @@ def main() -> int:
         prev_pose = pose
         path_points.append(pose[:3, 3].copy())
         recent_points.append(pose[:3, 3].copy())
+
+        # Build comparison path if available
+        if traj_map_compare is not None:
+            try:
+                t_cmp, q_cmp = _lookup_pose(ts_sec, ts_sorted_compare, traj_map_compare, tol)
+                pose_cmp = _make_pose_matrix(t_cmp, q_cmp)
+                if args.invert_pose:
+                    pose_cmp = np.linalg.inv(pose_cmp)
+                path_points_compare.append(pose_cmp[:3, 3].copy())
+            except KeyError:
+                pass  # No matching pose in comparison trajectory
         if len(recent_points) > 200:
             recent_points.pop(0)
 
@@ -1101,7 +1122,9 @@ def main() -> int:
                 ),
             )
             if path_points:
-                rr.log("world/path", rr.LineStrips3D([path_points]))
+                rr.log("world/path_slam", rr.LineStrips3D([path_points], colors=[[0, 255, 0]]))  # green = SLAM/primary
+            if path_points_compare:
+                rr.log("world/path_odom", rr.LineStrips3D([path_points_compare], colors=[[255, 128, 0]]))  # orange = odometry/compare
             rr.log("world/rgb", rr.Image(rgb_uint8))
             rr.log("world/depth", rr.DepthImage(depth_m.astype(np.float32), meter=1.0))
 
