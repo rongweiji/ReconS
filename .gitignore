@@ -15,3 +15,4 @@ outputs/
 orbslam3_rgbd/build
 __pycache__
 .claude/
+cam-calib/cali_data2
