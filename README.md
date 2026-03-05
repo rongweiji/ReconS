@@ -31,17 +31,26 @@ Why two envs:
 ```bash
 conda create -n pycuvslam python=3.10 -y
 conda activate pycuvslam
+# Optional (system deps used by Open3D/nvblox visualization):
+# sudo apt-get install -y python3-pip libglib2.0-0 libgl1
 python -m pip install --upgrade pip
 python -m pip install ./third_party/PyCuVSLAM/bin/x86_64
 python -m pip install ./third_party/pyCuSFM
-# Install a CUDA-matched PyTorch build (example: CUDA 12.4)
-python -m pip install "torch==2.5.1+cu124" --index-url https://download.pytorch.org/whl/cu124
+# Install a CUDA-matched PyTorch build (choose one that matches your CUDA stack):
+# CUDA 12.x example
+python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+# CUDA 11.8 example
+# python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
 
 # Install ONE nvblox_torch wheel matching your Ubuntu + CUDA stack:
-# Ubuntu 22.04 + CUDA 12
-python -m pip install "https://github.com/nvidia-isaac/nvblox/releases/download/v0.0.9/nvblox_torch-0.0.9%2Bcu12ubuntu22-py3-none-linux_x86_64.whl"
-# Ubuntu 24.04 + CUDA 12 (alternative)
-# python -m pip install "https://github.com/nvidia-isaac/nvblox/releases/download/v0.0.9/nvblox_torch-0.0.9%2Bcu12ubuntu24-py3-none-linux_x86_64.whl"
+# Ubuntu 24.04 + CUDA 12.8
+# python -m pip install "https://github.com/nvidia-isaac/nvblox/releases/download/v0.0.9/nvblox_torch-0.0.9+cu12ubuntu24-py3-none-linux_x86_64.whl"
+# Ubuntu 22.04 + CUDA 12.6
+python -m pip install "https://github.com/nvidia-isaac/nvblox/releases/download/v0.0.9/nvblox_torch-0.0.9+cu12ubuntu22-py3-none-linux_x86_64.whl"
+# Ubuntu 22.04 + CUDA 11.8
+# python -m pip install "https://github.com/nvidia-isaac/nvblox/releases/download/v0.0.9/nvblox_torch-0.0.9+cu11ubuntu22-py3-none-linux_x86_64.whl"
+# Ubuntu 24.04 + CUDA 13.0
+# python -m pip install "https://github.com/nvidia-isaac/nvblox/releases/download/v0.0.9/nvblox_torch-0.0.9+cu13ubuntu24-py3-none-linux_x86_64.whl"
 python -m pip install -r requirements.txt rerun-sdk open3d
 ```
 Install these once when creating the `pycuvslam` env (or any time you recreate it), before running `run_full_pipeline.py` or any `pipelines/run_nvblox*.py` script.
