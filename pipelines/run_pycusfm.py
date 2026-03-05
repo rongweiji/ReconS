@@ -279,6 +279,18 @@ def main() -> int:
     parser.add_argument("--poses", required=True, type=Path, help="TUM trajectory file (e.g., cuvslam_poses_slam.tum).")
     parser.add_argument("--out-dir", type=Path, help="cuSFM output folder (default: <rgb-dir>/../cusfm_output).")
     parser.add_argument("--frames-meta-out", type=Path, help="frames_meta.json output (default: <base>/frames_meta_cusfm.json).")
+    parser.add_argument(
+        "--min-inter-frame-distance",
+        type=float,
+        default=0.06,
+        help="cuSFM keyframe translation threshold in meters (denser than cuSFM default 0.5).",
+    )
+    parser.add_argument(
+        "--min-inter-frame-rotation-degrees",
+        type=float,
+        default=1.5,
+        help="cuSFM keyframe rotation threshold in degrees (denser than cuSFM default 5.0).",
+    )
     args = parser.parse_args()
 
     rgb_dir = args.rgb_dir.expanduser().resolve()
@@ -313,6 +325,10 @@ def main() -> int:
         "--override_frames_meta_file",
         str(frames_meta_path),
         "--skip_cuvslam",
+        "--min_inter_frame_distance",
+        str(args.min_inter_frame_distance),
+        "--min_inter_frame_rotation_degrees",
+        str(args.min_inter_frame_rotation_degrees),
     ]
     env = _env_with_conda_lib(os.environ)
     _run(cmd, env=env)

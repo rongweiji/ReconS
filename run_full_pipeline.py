@@ -271,6 +271,18 @@ def main() -> int:
     parser.add_argument("--skip-cusfm", action="store_true", help="Skip cuSFM sparse reconstruction.")
     parser.add_argument("--cusfm-out", type=Path, help="Output folder for cuSFM (default: <base>/cusfm_output)")
     parser.add_argument("--frames-meta-out", type=Path, help="frames_meta.json output for cuSFM (default: <base>/frames_meta_cusfm.json)")
+    parser.add_argument(
+        "--cusfm-min-inter-frame-distance",
+        type=float,
+        default=0.06,
+        help="cuSFM keyframe translation threshold in meters (denser than cuSFM default 0.5).",
+    )
+    parser.add_argument(
+        "--cusfm-min-inter-frame-rotation-degrees",
+        type=float,
+        default=1.5,
+        help="cuSFM keyframe rotation threshold in degrees (denser than cuSFM default 5.0).",
+    )
     # nvblox-sfm options (enabled by default)
     parser.add_argument("--skip-nvblox-sfm", action="store_true", help="Skip nvblox with SFM keyframes for refined mesh.")
     parser.add_argument("--nvblox-sfm-out", type=Path, help="Output folder for nvblox-sfm (default: <base>/nvblox_sfm_out)")
@@ -416,6 +428,10 @@ def main() -> int:
             str(cusfm_out),
             "--frames-meta-out",
             str(frames_meta_path),
+            "--min-inter-frame-distance",
+            str(args.cusfm_min_inter_frame_distance),
+            "--min-inter-frame-rotation-degrees",
+            str(args.cusfm_min_inter_frame_rotation_degrees),
         ]
         cusfm_env = _env_with_cusfm_libs(os.environ, repo_root)
         _run(cusfm_cmd, env=cusfm_env)
