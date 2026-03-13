@@ -93,10 +93,12 @@ Outputs land alongside the sample:
 - `nvblox_out/` - mesh from all frames
 - `cusfm_output/` - sparse reconstruction + `keyframes/`
 - `nvblox_sfm_out/` - refined mesh from SFM keyframes
+- `sharp_pre_cusfm/` - optional filtered subset + filtered cuSFM/nvblox-sfm branch
+- `3dgrut_branches/` - branch manifests for comparing 3dgrut inputs
 
 ## Full Pipeline
 
-`run_full_pipeline.py` executes 6 steps end-to-end:
+`run_full_pipeline.py` executes 6 base steps end-to-end:
 
 1. **Depth** - Generate depth maps via Depth Anything TensorRT
 2. **PyCuVSLAM** - Visual odometry + SLAM poses
@@ -104,6 +106,8 @@ Outputs land alongside the sample:
 4. **nvblox** - Dense mesh from all frames
 5. **cuSFM** - Sparse reconstruction with keyframe selection
 6. **nvblox-sfm** - Refined mesh from SFM keyframes (cleaner for 3dgrut)
+
+7. **sharp-pre-cusfm** - Filter RGB frames with `sharp-frames-python`, rebuild a subset dataset, then run filtered cuSFM + filtered nvblox-sfm as a third 3dgrut branch by default
 
 ```bash
 # Using dataset folder (recommended)
@@ -114,6 +118,9 @@ python3 run_full_pipeline.py \
   --rgb-dir data/sample_xxx/iphone_mono \
   --calibration data/sample_xxx/iphone_calibration.yaml \
   --timestamps data/sample_xxx/timestamps.txt
+
+# The filtered pre-cuSFM comparison branch now runs by default
+python3 run_full_pipeline.py --dataset data/sample_20260208_i1
 ```
 
 **Outputs** (in dataset folder):
@@ -122,11 +129,30 @@ python3 run_full_pipeline.py \
 - `nvblox_out/` - mesh from all frames
 - `cusfm_output/` - sparse reconstruction + keyframes
 - `nvblox_sfm_out/nvblox_mesh.ply` - refined mesh for 3dgrut
+- `sharp_pre_cusfm/iphone_mono` - filtered RGB subset selected by sharp-frames
+- `sharp_pre_cusfm/cusfm_output/` - filtered cuSFM sparse reconstruction
+- `sharp_pre_cusfm/nvblox_sfm_out/nvblox_mesh.ply` - filtered refined mesh for branch C
+- `3dgrut_branches/branch_*.json` - manifests for branch A/B/C comparison
 
 **Options:**
 - `--skip-cusfm` / `--skip-nvblox-sfm` - skip SFM steps
 - `--disable-slam` - use odometry only
 - `--nvblox-ui` / `--nvblox-sfm-ui` - show visualization
+- `--sharp-selection-method batched|outlier-removal|best-n` - choose frame filtering strategy for the third branch (default: batched with batch size 3 and buffer 0)
 
 ## Individual runners
 See `pipelines/README.md` for per-step commands (`run_pycuvslam_rgbd.py`, `run_nvblox.py`, stereo variant, etc.).
+
+
+## Common command: 
+
+- Visualize nvblox meshes with the rerun viewer (after running `run_full_pipeline.py` or `run_nvblox.py`):
+```bash
+conda activate pycuvslam
+python utilities/rerun_phone_sample_player.py data/sample_20260302_i10_1080
+```
+
+```bash
+conda activate pycuvslam
+python utilities/rerun_nvblox_viewer.py data/sample_20260302_i10_1080/nvblox_out/mesh.ply
+```

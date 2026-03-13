@@ -2,6 +2,7 @@
 import argparse
 import csv
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -306,7 +307,11 @@ def main() -> int:
     slam_tracked = 0
     trajectory: list[list[float]] = []
     slam_trajectory: list[list[float]] = []
+    frame_latency_ms: list[float] = []
+    track_latency_ms: list[float] = []
+    loop_start = time.perf_counter()
     for frame_id, ts_ns in timestamps:
+        frame_start = time.perf_counter()
         rgb_path = args.rgb_dir / f"{frame_id}{rgb_ext}"
         depth_path = args.depth_dir / f"{frame_id}{depth_ext}"
         if not rgb_path.exists() or not depth_path.exists():
@@ -321,7 +326,9 @@ def main() -> int:
             map1, map2 = undistort_maps
             rgb = cv2.remap(rgb, map1, map2, interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
             depth = cv2.remap(depth, map1, map2, interpolation=cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        track_start = time.perf_counter()
         pose_est, slam_pose = tracker.track(ts_ns, images=[rgb], depths=[depth])
+        track_latency_ms.append((time.perf_counter() - track_start) * 1000.0)
         if pose_est.world_from_rig is not None:
             pose = pose_est.world_from_rig.pose
             tx, ty, tz = pose.translation
@@ -344,6 +351,7 @@ def main() -> int:
             slam_trajectory.append([float(stx), float(sty), float(stz)])
 
         processed += 1
+        frame_latency_ms.append((time.perf_counter() - frame_start) * 1000.0)
         if rr and (processed % max(args.preview_interval, 1) == 0):
             rr.set_time_sequence("frame", processed)
             rgb_preview = np.ascontiguousarray(rgb[:, :, ::-1])
@@ -390,9 +398,29 @@ def main() -> int:
     out_f.close()
     if slam_f:
         slam_f.close()
+    loop_wall_time_s = time.perf_counter() - loop_start
     print(f"Done. Tracked {tracked}/{processed} frames.")
     if args.enable_slam:
         print(f"SLAM poses: {slam_tracked}/{processed}")
+    if processed:
+        mean_frame_ms = float(np.mean(frame_latency_ms))
+        median_frame_ms = float(np.median(frame_latency_ms))
+        p95_frame_ms = float(np.percentile(frame_latency_ms, 95))
+        mean_track_ms = float(np.mean(track_latency_ms))
+        median_track_ms = float(np.median(track_latency_ms))
+        p95_track_ms = float(np.percentile(track_latency_ms, 95))
+        processing_fps = processed / loop_wall_time_s if loop_wall_time_s > 0.0 else float("inf")
+        print("Runtime stats:")
+        print(f"  wall_time_sec: {loop_wall_time_s:.3f}")
+        print(f"  processing_fps: {processing_fps:.2f}")
+        print(
+            "  frame_latency_ms: "
+            f"mean={mean_frame_ms:.2f} median={median_frame_ms:.2f} p95={p95_frame_ms:.2f}"
+        )
+        print(
+            "  tracker_latency_ms: "
+            f"mean={mean_track_ms:.2f} median={median_track_ms:.2f} p95={p95_track_ms:.2f}"
+        )
     print(f"Saved poses to {args.out}")
     if args.enable_slam:
         print(f"Saved SLAM poses to {args.slam_out}")
